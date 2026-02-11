@@ -11,18 +11,26 @@
 
 ## 步骤 2：查找节点名称
 
-硬件接口参数通常位于 `controller_manager` 节点下。首先查找节点名称：
+硬件接口参数位于硬件接口组件所在的节点下。首先查找节点名称：
 
 ```bash
 # 查看所有节点
 ros2 node list
 
-# 查找包含 controller_manager 的节点
-ros2 node list | grep controller
+# 查找硬件接口节点（通常包含硬件名称，如 arx5_system）
+ros2 node list | grep arx
 
-# 通常节点名称类似：
-# /controller_manager
+# 或者查看所有节点的参数，找到包含 joint_k_gains 的节点
+for node in $(ros2 node list); do
+    if ros2 param list $node 2>/dev/null | grep -q joint_k_gains; then
+        echo "Found hardware interface node: $node"
+    fi
+done
 ```
+
+**常见的节点名称：**
+- `/arx5_system` - ARX X5 硬件接口节点
+- `/controller_manager` - 控制器管理器节点（不包含硬件参数）
 
 ## 步骤 3：查看当前参数
 
@@ -30,19 +38,19 @@ ros2 node list | grep controller
 
 ```bash
 # 查看所有参数
-ros2 param list /controller_manager
+ros2 param list /arx5_system
 
 # 查看关节位置增益（kp）
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 
 # 查看关节阻尼增益（kd）
-ros2 param get /controller_manager joint_d_gains
+ros2 param get /arx5_system joint_d_gains
 
 # 查看夹爪位置增益
-ros2 param get /controller_manager gripper_kp
+ros2 param get /arx5_system gripper_kp
 
 # 查看夹爪阻尼增益
-ros2 param get /controller_manager gripper_kd
+ros2 param get /arx5_system gripper_kd
 ```
 
 **示例输出：**
@@ -57,7 +65,7 @@ String value is: [80.0, 70.0, 70.0, 30.0, 30.0, 20.0]
 ```bash
 # 设置6个关节的位置增益
 # 格式：[joint1, joint2, joint3, joint4, joint5, joint6]
-ros2 param set /controller_manager joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
 ```
 
 **参数说明：**
@@ -68,20 +76,20 @@ ros2 param set /controller_manager joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0
 **示例场景：**
 ```bash
 # 场景1：提高前3个关节的刚度（用于快速运动）
-ros2 param set /controller_manager joint_k_gains "[120.0, 100.0, 90.0, 30.0, 30.0, 20.0]"
+ros2 param set /arx5_system joint_k_gains "[120.0, 100.0, 90.0, 30.0, 30.0, 20.0]"
 
 # 场景2：降低所有关节刚度（用于柔顺控制）
-ros2 param set /controller_manager joint_k_gains "[40.0, 35.0, 35.0, 15.0, 15.0, 10.0]"
+ros2 param set /arx5_system joint_k_gains "[40.0, 35.0, 35.0, 15.0, 15.0, 10.0]"
 
 # 场景3：恢复默认值
-ros2 param set /controller_manager joint_k_gains "[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]"
+ros2 param set /arx5_system joint_k_gains "[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]"
 ```
 
 ### 4.2 调整关节阻尼增益（joint_d_gains）
 
 ```bash
 # 设置6个关节的阻尼增益
-ros2 param set /controller_manager joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
+ros2 param set /arx5_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
 ```
 
 **参数说明：**
@@ -92,20 +100,20 @@ ros2 param set /controller_manager joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]
 **示例场景：**
 ```bash
 # 场景1：增加阻尼（减少振动）
-ros2 param set /controller_manager joint_d_gains "[4.0, 3.0, 3.0, 2.0, 1.5, 1.0]"
+ros2 param set /arx5_system joint_d_gains "[4.0, 3.0, 3.0, 2.0, 1.5, 1.0]"
 
 # 场景2：降低阻尼（更灵敏）
-ros2 param set /controller_manager joint_d_gains "[1.0, 1.0, 1.0, 0.5, 0.5, 0.4]"
+ros2 param set /arx5_system joint_d_gains "[1.0, 1.0, 1.0, 0.5, 0.5, 0.4]"
 
 # 场景3：恢复默认值
-ros2 param set /controller_manager joint_d_gains "[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]"
+ros2 param set /arx5_system joint_d_gains "[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]"
 ```
 
 ### 4.3 调整夹爪位置增益（gripper_kp）
 
 ```bash
 # 设置夹爪位置增益
-ros2 param set /controller_manager gripper_kp 10.0
+ros2 param set /arx5_system gripper_kp 10.0
 ```
 
 **参数说明：**
@@ -116,20 +124,20 @@ ros2 param set /controller_manager gripper_kp 10.0
 **示例场景：**
 ```bash
 # 场景1：提高夹爪响应速度
-ros2 param set /controller_manager gripper_kp 10.0
+ros2 param set /arx5_system gripper_kp 10.0
 
 # 场景2：降低夹爪响应速度（更柔顺）
-ros2 param set /controller_manager gripper_kp 3.0
+ros2 param set /arx5_system gripper_kp 3.0
 
 # 场景3：恢复默认值
-ros2 param set /controller_manager gripper_kp 5.0
+ros2 param set /arx5_system gripper_kp 5.0
 ```
 
 ### 4.4 调整夹爪阻尼增益（gripper_kd）
 
 ```bash
 # 设置夹爪阻尼增益
-ros2 param set /controller_manager gripper_kd 0.5
+ros2 param set /arx5_system gripper_kd 0.5
 ```
 
 **参数说明：**
@@ -140,13 +148,13 @@ ros2 param set /controller_manager gripper_kd 0.5
 **示例场景：**
 ```bash
 # 场景1：增加夹爪阻尼
-ros2 param set /controller_manager gripper_kd 1.0
+ros2 param set /arx5_system gripper_kd 1.0
 
 # 场景2：降低夹爪阻尼
-ros2 param set /controller_manager gripper_kd 0.2
+ros2 param set /arx5_system gripper_kd 0.2
 
 # 场景3：恢复默认值
-ros2 param set /controller_manager gripper_kd 0.2
+ros2 param set /arx5_system gripper_kd 0.2
 ```
 
 ## 步骤 5：验证参数是否生效
@@ -164,7 +172,7 @@ ros2 param set /controller_manager gripper_kd 0.2
 
 ```bash
 # 确认参数已更新
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 # 应该显示新设置的值
 ```
 
@@ -182,51 +190,51 @@ ros2 param get /controller_manager joint_k_gains
 
 ```bash
 # 1. 查看当前参数
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 
 # 2. 提高前3个关节的刚度和阻尼（用于快速运动）
-ros2 param set /controller_manager joint_k_gains "[120.0, 100.0, 90.0, 30.0, 30.0, 20.0]"
-ros2 param set /controller_manager joint_d_gains "[3.0, 2.5, 2.5, 1.0, 1.0, 0.7]"
+ros2 param set /arx5_system joint_k_gains "[120.0, 100.0, 90.0, 30.0, 30.0, 20.0]"
+ros2 param set /arx5_system joint_d_gains "[3.0, 2.5, 2.5, 1.0, 1.0, 0.7]"
 
 # 3. 验证
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 ```
 
 ### 示例 2：柔顺控制模式
 
 ```bash
 # 1. 降低所有关节的刚度（用于柔顺控制或接触任务）
-ros2 param set /controller_manager joint_k_gains "[40.0, 35.0, 35.0, 15.0, 15.0, 10.0]"
-ros2 param set /controller_manager joint_d_gains "[1.5, 1.5, 1.5, 0.8, 0.8, 0.5]"
+ros2 param set /arx5_system joint_k_gains "[40.0, 35.0, 35.0, 15.0, 15.0, 10.0]"
+ros2 param set /arx5_system joint_d_gains "[1.5, 1.5, 1.5, 0.8, 0.8, 0.5]"
 
 # 2. 验证
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 ```
 
 ### 示例 3：精细操作模式
 
 ```bash
 # 1. 调整末端关节（关节5和6）的增益（用于精细操作）
-ros2 param set /controller_manager joint_k_gains "[80.0, 70.0, 70.0, 30.0, 15.0, 10.0]"
-ros2 param set /controller_manager joint_d_gains "[2.0, 2.0, 2.0, 1.0, 0.5, 0.4]"
+ros2 param set /arx5_system joint_k_gains "[80.0, 70.0, 70.0, 30.0, 15.0, 10.0]"
+ros2 param set /arx5_system joint_d_gains "[2.0, 2.0, 2.0, 1.0, 0.5, 0.4]"
 
 # 2. 验证
-ros2 param get /controller_manager joint_k_gains
+ros2 param get /arx5_system joint_k_gains
 ```
 
 ### 示例 4：夹爪精细控制
 
 ```bash
 # 1. 提高夹爪增益（用于快速抓取）
-ros2 param set /controller_manager gripper_kp 10.0
-ros2 param set /controller_manager gripper_kd 0.5
+ros2 param set /arx5_system gripper_kp 10.0
+ros2 param set /arx5_system gripper_kd 0.5
 
 # 2. 或者降低夹爪增益（用于柔顺抓取）
-ros2 param set /controller_manager gripper_kp 3.0
-ros2 param set /controller_manager gripper_kd 0.1
+ros2 param set /arx5_system gripper_kp 3.0
+ros2 param set /arx5_system gripper_kd 0.1
 
 # 3. 验证
-ros2 param get /controller_manager gripper_kp
+ros2 param get /arx5_system gripper_kp
 ```
 
 ## 错误处理
@@ -235,7 +243,7 @@ ros2 param get /controller_manager gripper_kp
 
 ```bash
 # 错误示例：只提供了5个值，需要6个
-ros2 param set /controller_manager joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
+ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 
 # 错误信息：
 # Set parameter failed: joint_k_gains must have exactly 6 values (for 6-joint robot)
@@ -259,7 +267,7 @@ ros2 param set /controller_manager joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0
 # Node not found: /wrong_node_name
 ```
 
-**解决方法：** 使用 `ros2 node list` 查找正确的节点名称
+**解决方法：** 使用 `ros2 node list` 查找正确的节点名称（通常是 `/arx5_system`）
 
 ## 注意事项
 
@@ -288,17 +296,40 @@ ros2 param set /controller_manager joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0
 
 ```bash
 # 查看所有参数
-ros2 param list /controller_manager
+ros2 param list /arx5_system
 
 # 查看单个参数
-ros2 param get /controller_manager <param_name>
+ros2 param get /arx5_system <param_name>
 
 # 设置参数
-ros2 param set /controller_manager <param_name> <value>
+ros2 param set /arx5_system <param_name> <value>
 
 # 查看节点信息
-ros2 node info /controller_manager
+ros2 node info /arx5_system
 
 # 查看日志
 ros2 topic echo /rosout | grep arx_x5_hardware
+```
+
+## 快速参考
+
+**节点名称：** `/arx5_system`
+
+**可用参数：**
+- `joint_k_gains` - 关节位置增益（6个值的数组）
+- `joint_d_gains` - 关节阻尼增益（6个值的数组）
+- `gripper_kp` - 夹爪位置增益（单个值）
+- `gripper_kd` - 夹爪阻尼增益（单个值）
+
+**快速设置示例：**
+```bash
+# 查看当前增益
+ros2 param get /arx5_system joint_k_gains
+ros2 param get /arx5_system joint_d_gains
+
+# 设置增益
+ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx5_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
+ros2 param set /arx5_system gripper_kp 10.0
+ros2 param set /arx5_system gripper_kd 0.5
 ```
