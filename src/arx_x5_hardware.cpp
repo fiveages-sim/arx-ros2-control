@@ -175,13 +175,9 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
             // 根据关节名称前缀判断属于左臂还是右臂
             // 假设左臂关节名称包含"left"或"l_"，右臂包含"right"或"r_"
             if (arm_index_ == ARM_DUAL) {
-                if (joint_name_lower.find("left") != std::string::npos || 
-                    joint_name_lower.find("l_") != std::string::npos ||
-                    (joint_name_lower.length() > 0 && joint_name_lower[0] == 'l')) {
+                if (joint_name_lower.find("left") != std::string::npos) {
                     left_joint_names_.push_back(joint.name);
-                } else if (joint_name_lower.find("right") != std::string::npos || 
-                          joint_name_lower.find("r_") != std::string::npos ||
-                          (joint_name_lower.length() > 0 && joint_name_lower[0] == 'r')) {
+                } else if (joint_name_lower.find("right") != std::string::npos) {
                     right_joint_names_.push_back(joint.name);
                 } else {
                     // 如果没有明确的前缀，按顺序分配：前半部分给左臂，后半部分给右臂
@@ -201,13 +197,13 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     }
     
     // 计算关节数量
-    joint_count_ = static_cast<int>(joint_names_.size());
-    left_joint_count_ = static_cast<int>(left_joint_names_.size());
-    right_joint_count_ = static_cast<int>(right_joint_names_.size());
+    joint_count_ = joint_names_.size();
+    left_joint_count_ = left_joint_names_.size();
+    right_joint_count_ = right_joint_names_.size();
     
     if (arm_index_ == ARM_DUAL) {
         RCLCPP_INFO(get_logger(),
-                    "Dual-arm configuration: left=%d joints, right=%d joints, total=%d joints",
+                    "Dual-arm configuration: left=%zu joints, right=%zu joints, total=%zu joints",
                     left_joint_count_, right_joint_count_, joint_count_);
     }
     
@@ -216,6 +212,12 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         RCLCPP_INFO(get_logger(),
                     "Found %zu gripper joint(s), expected %zu gripper(s) for %s arm config",
                     gripper_joint_names_.size(), expected_grippers, arm_config_.c_str());
+        if (gripper_joint_names_.size() != expected_grippers) {
+            RCLCPP_WARN(get_logger(),
+                        "Gripper count mismatch: found %zu but expected %zu for %s mode. "
+                        "Right arm gripper may not function correctly.",
+                        gripper_joint_names_.size(), expected_grippers, arm_config_.c_str());
+        }
     }
 
     // 初始化状态和命令数组
@@ -237,7 +239,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     controllers_[1] = nullptr;
 
     RCLCPP_INFO(get_logger(),
-                "Initialized %s arm config with %d joints",
+                "Initialized %s arm config with %zu joints",
                 arm_config_.c_str(), joint_count_);
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -259,7 +261,7 @@ std::vector<hardware_interface::StateInterface> ArxX5Hardware::export_state_inte
     std::vector<hardware_interface::StateInterface> state_interfaces;
 
     // 导出关节状态接口
-    for (int i = 0; i < joint_count_; ++i) {
+    for (size_t i = 0; i < joint_count_; ++i) {
         state_interfaces.emplace_back(
             joint_names_[i], hardware_interface::HW_IF_POSITION, &position_states_[i]);
         state_interfaces.emplace_back(
@@ -299,7 +301,7 @@ std::vector<hardware_interface::CommandInterface> ArxX5Hardware::export_command_
     std::vector<hardware_interface::CommandInterface> command_interfaces;
 
     // 导出关节命令接口
-    for (int i = 0; i < joint_count_; ++i) {
+    for (size_t i = 0; i < joint_count_; ++i) {
         command_interfaces.emplace_back(
             joint_names_[i], hardware_interface::HW_IF_POSITION, &position_commands_[i]);
     }
@@ -336,14 +338,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     // 验证配置参数
     if (arm_index_ == ARM_DUAL) {
         RCLCPP_INFO(get_logger(), "Configuration: Dual-arm mode");
-        RCLCPP_INFO(get_logger(), "  Left arm: model=%s, CAN=%s, joints=%d",
+        RCLCPP_INFO(get_logger(), "  Left arm: model=%s, CAN=%s, joints=%zu",
                     left_robot_model_.c_str(), left_can_interface_.c_str(), left_joint_count_);
-        RCLCPP_INFO(get_logger(), "  Right arm: model=%s, CAN=%s, joints=%d",
+        RCLCPP_INFO(get_logger(), "  Right arm: model=%s, CAN=%s, joints=%zu",
                     right_robot_model_.c_str(), right_can_interface_.c_str(), right_joint_count_);
     } else {
         const std::string& model = (arm_index_ == ARM_LEFT) ? left_robot_model_ : right_robot_model_;
         const std::string& can_if = (arm_index_ == ARM_LEFT) ? left_can_interface_ : right_can_interface_;
-        RCLCPP_INFO(get_logger(), "Configuration: %s arm mode, model=%s, CAN=%s, joints=%d",
+        RCLCPP_INFO(get_logger(), "Configuration: %s arm mode, model=%s, CAN=%s, joints=%zu",
                     arm_config_.c_str(), model.c_str(), can_if.c_str(), joint_count_);
     }
 
@@ -413,8 +415,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
     const int read_interval_ms = 100;
 
     // 辅助函数：检查关节状态是否全零（可能表示硬件未就绪）
-    auto is_all_zeros = [](const arx::JointState& state, int count) -> bool {
-        for (int i = 0; i < count && i < static_cast<int>(state.pos.size()); ++i) {
+    auto is_all_zeros = [](const arx::JointState& state, size_t count) -> bool {
+        for (size_t i = 0; i < count && i < static_cast<size_t>(state.pos.size()); ++i) {
             if (std::abs(state.pos[i]) > 1e-6) {
                 return false;
             }
@@ -423,8 +425,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
     };
 
     // 辅助函数：检查关节状态是否包含 NaN/Inf
-    auto has_invalid_values = [](const arx::JointState& state, int count) -> bool {
-        for (int i = 0; i < count && i < static_cast<int>(state.pos.size()); ++i) {
+    auto has_invalid_values = [](const arx::JointState& state, size_t count) -> bool {
+        for (size_t i = 0; i < count && i < static_cast<size_t>(state.pos.size()); ++i) {
             if (std::isnan(state.pos[i]) || std::isinf(state.pos[i])) {
                 return true;
             }
@@ -548,7 +550,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             }
 
             // 更新左臂状态
-            for (int i = 0; i < left_joint_count_ && i < static_cast<int>(left_state.pos.size()); ++i) {
+            for (size_t i = 0; i < left_joint_count_ && i < static_cast<size_t>(left_state.pos.size()); ++i) {
                 position_states_[i] = left_state.pos[i];
                 velocity_states_[i] = left_state.vel[i];
                 effort_states_[i] = left_state.torque[i];
@@ -556,8 +558,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             }
 
             // 更新右臂状态
-            for (int i = 0; i < right_joint_count_ && i < static_cast<int>(right_state.pos.size()); ++i) {
-                const int dst_idx = left_joint_count_ + i;
+            for (size_t i = 0; i < right_joint_count_ && i < static_cast<size_t>(right_state.pos.size()); ++i) {
+                const size_t dst_idx = left_joint_count_ + i;
                 if (dst_idx < joint_count_) {
                     position_states_[dst_idx] = right_state.pos[i];
                     velocity_states_[dst_idx] = right_state.vel[i];
@@ -644,7 +646,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             }
 
             // 更新关节状态
-            for (int i = 0; i < joint_count_ && i < static_cast<int>(initial_state.pos.size()); ++i) {
+            for (size_t i = 0; i < joint_count_ && i < static_cast<size_t>(initial_state.pos.size()); ++i) {
                 position_states_[i] = initial_state.pos[i];
                 velocity_states_[i] = initial_state.vel[i];
                 effort_states_[i] = initial_state.torque[i];
@@ -662,11 +664,11 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         if (arm_index_ == ARM_DUAL) {
             left_cmd_buffer_.emplace(left_joint_count_);
             right_cmd_buffer_.emplace(right_joint_count_);
-            RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffers: left=%d, right=%d joints",
+            RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffers: left=%zu, right=%zu joints",
                         left_joint_count_, right_joint_count_);
         } else {
             single_cmd_buffer_.emplace(joint_count_);
-            RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffer: %d joints", joint_count_);
+            RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffer: %zu joints", joint_count_);
         }
 
         hardware_connected_ = true;
@@ -826,7 +828,7 @@ hardware_interface::return_type ArxX5Hardware::read(
             // 双臂模式：从两个控制器读取状态
             // 读取左臂状态
             arx::JointState left_state = controllers_[ARM_LEFT]->get_joint_state();
-            for (int i = 0; i < left_joint_count_ && i < static_cast<int>(left_state.pos.size()); ++i) {
+            for (size_t i = 0; i < left_joint_count_ && i < static_cast<size_t>(left_state.pos.size()); ++i) {
                 validate_and_update(left_state.pos[i], position_states_[i], "Left joint position", i);
                 validate_and_update(left_state.vel[i], velocity_states_[i], "Left joint velocity", i);
                 validate_and_update(left_state.torque[i], effort_states_[i], "Left joint effort", i);
@@ -834,8 +836,8 @@ hardware_interface::return_type ArxX5Hardware::read(
 
             // 读取右臂状态
             arx::JointState right_state = controllers_[ARM_RIGHT]->get_joint_state();
-            for (int i = 0; i < right_joint_count_ && i < static_cast<int>(right_state.pos.size()); ++i) {
-                const int dst_idx = left_joint_count_ + i;
+            for (size_t i = 0; i < right_joint_count_ && i < static_cast<size_t>(right_state.pos.size()); ++i) {
+                const size_t dst_idx = left_joint_count_ + i;
                 if (dst_idx < joint_count_) {
                     validate_and_update(right_state.pos[i], position_states_[dst_idx], "Right joint position", i);
                     validate_and_update(right_state.vel[i], velocity_states_[dst_idx], "Right joint velocity", i);
@@ -865,7 +867,7 @@ hardware_interface::return_type ArxX5Hardware::read(
             arx::JointState state = controllers_[arm_idx]->get_joint_state();
 
             // 更新关节状态（带 NaN/Inf 校验）
-            for (int i = 0; i < joint_count_ && i < static_cast<int>(state.pos.size()); ++i) {
+            for (size_t i = 0; i < joint_count_ && i < static_cast<size_t>(state.pos.size()); ++i) {
                 validate_and_update(state.pos[i], position_states_[i], "Joint position", i);
                 validate_and_update(state.vel[i], velocity_states_[i], "Joint velocity", i);
                 validate_and_update(state.torque[i], effort_states_[i], "Joint effort", i);
@@ -925,7 +927,7 @@ hardware_interface::return_type ArxX5Hardware::write(
 
             // 更新左臂命令缓冲区
             arx::JointState& left_cmd = *left_cmd_buffer_;
-            for (int i = 0; i < left_joint_count_; ++i) {
+            for (size_t i = 0; i < left_joint_count_; ++i) {
                 left_cmd.pos[i] = position_commands_[i];
             }
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
@@ -935,17 +937,14 @@ hardware_interface::return_type ArxX5Hardware::write(
 
             // 更新右臂命令缓冲区
             arx::JointState& right_cmd = *right_cmd_buffer_;
-            for (int i = 0; i < right_joint_count_; ++i) {
-                const int src_idx = left_joint_count_ + i;
+            for (size_t i = 0; i < right_joint_count_; ++i) {
+                const size_t src_idx = left_joint_count_ + i;
                 if (src_idx < joint_count_) {
                     right_cmd.pos[i] = position_commands_[src_idx];
                 }
             }
             if (has_gripper_ && gripper_joint_names_.size() >= 2) {
                 right_cmd.gripper_pos = gripper_position_commands_[1];
-            } else if (has_gripper_ && gripper_joint_names_.size() == 1) {
-                // 如果只有一个夹爪关节，使用第一个命令值
-                right_cmd.gripper_pos = gripper_position_commands_[0];
             }
             controllers_[ARM_RIGHT]->set_joint_cmd(right_cmd);
 
@@ -962,7 +961,7 @@ hardware_interface::return_type ArxX5Hardware::write(
 
             // 更新命令缓冲区
             arx::JointState& cmd = *single_cmd_buffer_;
-            for (int i = 0; i < joint_count_; ++i) {
+            for (size_t i = 0; i < joint_count_; ++i) {
                 cmd.pos[i] = position_commands_[i];
             }
 

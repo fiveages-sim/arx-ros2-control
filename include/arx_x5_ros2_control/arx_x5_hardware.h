@@ -97,9 +97,9 @@ private:
     std::string left_can_interface_; // 左臂CAN接口
     std::string right_can_interface_; // 右臂CAN接口
     
-    int joint_count_;              // 总关节数量
-    int left_joint_count_;         // 左臂关节数量
-    int right_joint_count_;        // 右臂关节数量
+    size_t joint_count_;              // 总关节数量
+    size_t left_joint_count_;         // 左臂关节数量
+    size_t right_joint_count_;        // 右臂关节数量
 
     // 关节名称
     std::vector<std::string> joint_names_;           // 所有关节名称（按顺序：左臂+右臂）

@@ -48,7 +48,8 @@ conda activate arx-py312
 
 ```bash
 # 确保在 SDK 目录下
-cd external/arx5-sdk
+conda activate arx-py312
+cd ~/ros2_ws/src/arms_ros2_control/hardwares/arx_x5_ros2_control/external/arx5-sdk
 
 # 创建构建目录
 mkdir -p build
@@ -60,8 +61,6 @@ cmake ..
 # 编译
 make -j$(nproc)
 
-# 可选：安装到系统
-# make install
 ```
 
 编译完成后，会在 `build` 目录下生成 `libArxJointController.so` 和 `libArxCartesianController.so` 等库文件。
@@ -75,14 +74,8 @@ make -j$(nproc)
 编译完 SDK 后，回到工作空间根目录编译 ROS2 包：
 
 ```bash
-# 回到工作空间根目录
 cd ~/ros2_ws
-
-# 编译包
 colcon build --packages-select arx_x5_ros2_control
-
-# 或编译整个工作空间
-# colcon build
 ```
 
 
