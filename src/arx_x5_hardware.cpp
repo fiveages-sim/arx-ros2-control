@@ -2,8 +2,60 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <algorithm>
 #include <unistd.h>  // for usleep
+#include <sstream>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 namespace arx_x5_ros2_control {
+
+    // 默认增益值（6关节 X5 机械臂）
+    static const std::vector<double> kDefaultJointKGains = {80.0, 70.0, 70.0, 30.0, 30.0, 20.0};
+    static const std::vector<double> kDefaultJointDGains = {2.0, 2.0, 2.0, 1.0, 1.0, 0.7};
+    static const double kDefaultGripperKP = 5.0;
+    static const double kDefaultGripperKD = 0.2;
+
+    // 辅助函数：字符串标准化（转大写）
+    static std::string normalizeString(const std::string& str)
+    {
+        std::string result = str;
+        std::transform(result.begin(), result.end(), result.begin(), ::toupper);
+        return result;
+    }
+
+    // 辅助函数：解析 hardware_parameters 中的数组字符串为 vector<double>
+    // 支持形如 "[1,2,3]"、"1, 2, 3"、"1 2 3" 等格式
+    static std::vector<double> parseDoubleArrayLoose(const std::string& str, const std::vector<double>& default_val)
+    {
+        if (str.empty()) {
+            return default_val;
+        }
+        std::string cleaned = str;
+        cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '['), cleaned.end());
+        cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), ']'), cleaned.end());
+        std::replace(cleaned.begin(), cleaned.end(), ',', ' ');
+
+        std::istringstream iss(cleaned);
+        std::vector<double> result;
+        double v = 0.0;
+        while (iss >> v) {
+            result.push_back(v);
+        }
+        return result.empty() ? default_val : result;
+    }
+
+    // rclcpp 参数类型映射（用于 declare_node_parameters 的类型检查）
+    template<typename T>
+    static constexpr rclcpp::ParameterType paramTypeOf();
+
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<std::string>() { return rclcpp::ParameterType::PARAMETER_STRING; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<int>() { return rclcpp::ParameterType::PARAMETER_INTEGER; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<double>() { return rclcpp::ParameterType::PARAMETER_DOUBLE; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<bool>() { return rclcpp::ParameterType::PARAMETER_BOOL; }
+    template<>
+    constexpr rclcpp::ParameterType paramTypeOf<std::vector<double>>() { return rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY; }
 
 /**
  * @brief 将字符串转换为大写形式
@@ -69,6 +121,67 @@ void ArxX5Hardware::declare_node_parameters()
         }
     };
 
+    // 辅助函数：确保 double 参数已声明
+    const auto ensure_double_param = [this](const std::string& name, double default_val, const std::string* hw_val) {
+        if (node_->has_parameter(name)) {
+            if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
+                try { 
+                    node_->undeclare_parameter(name); 
+                } catch (...) {}
+            } else {
+                return;
+            }
+        }
+
+        if (!node_->has_parameter(name)) {
+            double val = default_val;
+            if (hw_val) {
+                try {
+                    val = std::stod(*hw_val);
+                } catch (...) {
+                    val = default_val;
+                }
+            }
+            node_->declare_parameter<double>(name, val);
+        }
+    };
+
+    // 辅助函数：确保 double array 参数已声明（带长度校验）
+    const auto ensure_double_array_sized = [this, &hw_find](const std::string& name,
+                                                           const std::vector<double>& default_val,
+                                                           size_t expected_size) {
+        const std::string* hw_val = hw_find(name);
+
+        if (node_->has_parameter(name)) {
+            if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
+                try { 
+                    node_->undeclare_parameter(name); 
+                } catch (...) {}
+            } else {
+                // 类型正确，校验长度
+                try {
+                    const auto current = node_->get_parameter(name).get_value<std::vector<double>>();
+                    if (current.size() == expected_size) {
+                        return; // 已存在且长度正确：尊重现有值
+                    }
+                } catch (...) {
+                    // fallthrough: undeclare + redeclare
+                }
+                try { 
+                    node_->undeclare_parameter(name); 
+                } catch (...) {}
+            }
+        }
+
+        if (!node_->has_parameter(name)) {
+            std::vector<double> val = hw_val ? parseDoubleArrayLoose(*hw_val, default_val) : default_val;
+            if (val.size() != expected_size) {
+                val = default_val;
+            }
+            node_->declare_parameter<std::vector<double>>(name, val);
+        }
+    };
+
     // arm_config: 臂配置 ("LEFT", "RIGHT", "DUAL")
     ensure_string_param("arm_config", "LEFT", hw_find("arm_config"));
     
@@ -81,6 +194,13 @@ void ArxX5Hardware::declare_node_parameters()
     ensure_string_param("right_robot_model", "X5", hw_find("right_robot_model"));
     ensure_string_param("left_can_interface", "can0", hw_find("left_can_interface"));
     ensure_string_param("right_can_interface", "can1", hw_find("right_can_interface"));
+
+    // 增益参数（动态可调）
+    // 默认使用6关节的配置（X5机械臂）
+    ensure_double_array_sized("joint_k_gains", kDefaultJointKGains, 6);
+    ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
+    ensure_double_param("gripper_kp", kDefaultGripperKP, hw_find("gripper_kp"));
+    ensure_double_param("gripper_kd", kDefaultGripperKD, hw_find("gripper_kd"));
 }
 
 /**
@@ -352,6 +472,54 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     if (has_gripper_) {
         RCLCPP_INFO(get_logger(), "  Gripper: %zu joint(s)", gripper_joint_names_.size());
     }
+
+    // 根据实际关节数量调整增益参数长度
+    // 注意：在 on_configure 时，关节数量已经确定（在 on_init 中解析）
+    // 当前只支持6关节机械臂（X5）
+    size_t expected_joint_count = (arm_index_ == ARM_DUAL) ? 
+        std::max(left_joint_count_, right_joint_count_) : joint_count_;
+    
+    // 验证关节数量是否为6（当前只支持6关节）
+    if (expected_joint_count != 6) {
+        RCLCPP_WARN(get_logger(), 
+                    "Expected 6 joints for X5 robot, but got %zu joints. Using 6-joint default gains.",
+                    expected_joint_count);
+        expected_joint_count = 6;
+    }
+    
+    // 获取当前增益参数，如果长度不匹配则调整为6关节默认值
+    std::vector<double> current_kp = get_node_param("joint_k_gains", kDefaultJointKGains);
+    std::vector<double> current_kd = get_node_param("joint_d_gains", kDefaultJointDGains);
+    
+    // 如果长度不匹配，使用6关节默认值并更新参数
+    if (current_kp.size() != 6) {
+        current_kp = kDefaultJointKGains;
+        // 重新声明参数以更新长度
+        try {
+            node_->undeclare_parameter("joint_k_gains");
+        } catch (...) {}
+        node_->declare_parameter<std::vector<double>>("joint_k_gains", current_kp);
+        RCLCPP_INFO(get_logger(), "Adjusted joint_k_gains to 6-joint default values");
+    }
+    if (current_kd.size() != 6) {
+        current_kd = kDefaultJointDGains;
+        try {
+            node_->undeclare_parameter("joint_d_gains");
+        } catch (...) {}
+        node_->declare_parameter<std::vector<double>>("joint_d_gains", current_kd);
+        RCLCPP_INFO(get_logger(), "Adjusted joint_d_gains to 6-joint default values");
+    }
+    
+    // 初始化增益缓存
+    joint_k_gains_ = current_kp;
+    joint_d_gains_ = current_kd;
+    gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
+    gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
+
+    // 注册参数回调
+    param_callback_handle_ = node_->add_on_set_parameters_callback(
+        std::bind(&ArxX5Hardware::paramCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(get_logger(), "Parameter callback registered. Use 'ros2 param set' to change gains dynamically.");
 
     RCLCPP_INFO(get_logger(), "Configuration complete. Ready to activate.");
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -684,6 +852,15 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         }
 
         hardware_connected_ = true;
+        
+        // 应用初始增益值
+        if (arm_index_ == ARM_DUAL) {
+            applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+            applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+        } else {
+            applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+        }
+        
         RCLCPP_INFO(get_logger(), "Successfully activated!");
         return hardware_interface::CallbackReturn::SUCCESS;
 
@@ -992,6 +1169,186 @@ hardware_interface::return_type ArxX5Hardware::write(
         RCLCPP_ERROR_THROTTLE(get_logger(), *node_->get_clock(), 1000,
                               "Write failed: %s", e.what());
         return hardware_interface::return_type::ERROR;
+    }
+}
+
+/**
+ * @brief 参数回调函数
+ * @param params 参数列表
+ * @return 设置参数的结果
+ *
+ * 处理动态参数修改，特别是增益参数（kp/kd）的调整
+ */
+rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
+    const std::vector<rclcpp::Parameter> & params)
+{
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    for (const auto & param : params) {
+        // 检查硬件是否已连接（增益参数需要硬件连接）
+        if (!hardware_connected_) {
+            // 对于增益参数，需要硬件连接
+            if (param.get_name() == "joint_k_gains" || param.get_name() == "joint_d_gains" ||
+                param.get_name() == "gripper_kp" || param.get_name() == "gripper_kd") {
+                result.successful = false;
+                result.reason = "Hardware not connected. Cannot set gains.";
+                return result;
+            }
+        }
+
+        if (param.get_name() == "joint_k_gains") {
+            std::vector<double> new_kp = param.as_double_array();
+            // 当前只支持6关节机械臂
+            const size_t expected_count = 6;
+            
+            if (new_kp.size() != expected_count) {
+                result.successful = false;
+                result.reason = "joint_k_gains must have exactly " + std::to_string(expected_count) + " values (for 6-joint robot)";
+                return result;
+            }
+            
+            joint_k_gains_ = new_kp;
+            RCLCPP_INFO(get_logger(), "joint_k_gains updated via parameter");
+            
+            // 应用到硬件
+            if (hardware_connected_) {
+                if (arm_index_ == ARM_DUAL) {
+                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                } else {
+                    applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                }
+            }
+        }
+        else if (param.get_name() == "joint_d_gains") {
+            std::vector<double> new_kd = param.as_double_array();
+            // 当前只支持6关节机械臂
+            const size_t expected_count = 6;
+            
+            if (new_kd.size() != expected_count) {
+                result.successful = false;
+                result.reason = "joint_d_gains must have exactly " + std::to_string(expected_count) + " values (for 6-joint robot)";
+                return result;
+            }
+            
+            joint_d_gains_ = new_kd;
+            RCLCPP_INFO(get_logger(), "joint_d_gains updated via parameter");
+            
+            // 应用到硬件
+            if (hardware_connected_) {
+                if (arm_index_ == ARM_DUAL) {
+                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                } else {
+                    applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                }
+            }
+        }
+        else if (param.get_name() == "gripper_kp") {
+            double new_gripper_kp = param.as_double();
+            if (new_gripper_kp < 0.0) {
+                result.successful = false;
+                result.reason = "gripper_kp must be >= 0";
+                return result;
+            }
+            
+            gripper_kp_ = new_gripper_kp;
+            RCLCPP_INFO(get_logger(), "gripper_kp updated to: %.2f", gripper_kp_);
+            
+            // 应用到硬件
+            if (hardware_connected_) {
+                if (arm_index_ == ARM_DUAL) {
+                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                } else {
+                    applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                }
+            }
+        }
+        else if (param.get_name() == "gripper_kd") {
+            double new_gripper_kd = param.as_double();
+            if (new_gripper_kd < 0.0) {
+                result.successful = false;
+                result.reason = "gripper_kd must be >= 0";
+                return result;
+            }
+            
+            gripper_kd_ = new_gripper_kd;
+            RCLCPP_INFO(get_logger(), "gripper_kd updated to: %.2f", gripper_kd_);
+            
+            // 应用到硬件
+            if (hardware_connected_) {
+                if (arm_index_ == ARM_DUAL) {
+                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                } else {
+                    applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * @brief 应用增益到硬件
+ * @param arm_index 臂索引 (ARM_LEFT, ARM_RIGHT)
+ * @param kp 位置增益数组
+ * @param kd 阻尼增益数组
+ * @param gripper_kp 夹爪位置增益
+ * @param gripper_kd 夹爪阻尼增益
+ *
+ * 将增益参数应用到指定的机械臂控制器
+ */
+void ArxX5Hardware::applyGains(int arm_index, const std::vector<double>& kp, 
+                                const std::vector<double>& kd, 
+                                double gripper_kp, double gripper_kd)
+{
+    if (!controllers_[arm_index]) {
+        RCLCPP_WARN(get_logger(), "Controller[%d] not initialized, cannot apply gains", arm_index);
+        return;
+    }
+
+    try {
+        // 当前只支持6关节机械臂
+        const size_t joint_count = 6;
+        
+        // 验证输入数组长度
+        if (kp.size() < joint_count || kd.size() < joint_count) {
+            RCLCPP_ERROR(get_logger(), 
+                        "Gain arrays too short: kp.size()=%zu, kd.size()=%zu, expected %zu",
+                        kp.size(), kd.size(), joint_count);
+            return;
+        }
+        
+        // 创建 Gain 结构（6关节）
+        arx::Gain gain(static_cast<int>(joint_count));
+        
+        // 设置关节增益（6个关节）
+        for (size_t i = 0; i < joint_count; ++i) {
+            gain.kp[i] = kp[i];
+            gain.kd[i] = kd[i];
+        }
+        
+        // 设置夹爪增益
+        gain.gripper_kp = static_cast<float>(gripper_kp);
+        gain.gripper_kd = static_cast<float>(gripper_kd);
+        
+        // 应用到控制器
+        controllers_[arm_index]->set_gain(gain);
+        
+        const char* arm_name = (arm_index == ARM_LEFT) ? "Left" : 
+                              (arm_index == ARM_RIGHT) ? "Right" : "Unknown";
+        RCLCPP_INFO(get_logger(), "%s arm gains applied: kp=[%.1f, %.1f, ...], kd=[%.1f, %.1f, ...], gripper_kp=%.2f, gripper_kd=%.2f",
+                    arm_name, 
+                    kp.empty() ? 0.0 : kp[0], kp.size() > 1 ? kp[1] : 0.0,
+                    kd.empty() ? 0.0 : kd[0], kd.size() > 1 ? kd[1] : 0.0,
+                    gripper_kp, gripper_kd);
+                    
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(get_logger(), "Failed to apply gains to arm[%d]: %s", arm_index, e.what());
     }
 }
 
