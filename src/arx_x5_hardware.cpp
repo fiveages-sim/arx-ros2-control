@@ -447,6 +447,13 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             controllers_[ARM_RIGHT] = std::make_shared<arx::Arx5JointController>(
                 right_robot_model_, right_can_interface_);
 
+            // 重置到 HOME 位置（确保机械臂处于已知安全位置）
+            RCLCPP_INFO(get_logger(), "Resetting left arm to home position...");
+            controllers_[ARM_LEFT]->reset_to_home();
+            RCLCPP_INFO(get_logger(), "Resetting right arm to home position...");
+            controllers_[ARM_RIGHT]->reset_to_home();
+            RCLCPP_INFO(get_logger(), "Both arms reset to home position.");
+
             // 读取左臂初始状态（带验证和重试）
             bool left_success = false;
             bool left_all_zeros_detected = false;
@@ -591,6 +598,11 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                         arm_config_.c_str(), model.c_str(), can_if.c_str());
 
             controllers_[arm_idx] = std::make_shared<arx::Arx5JointController>(model, can_if);
+
+            // 重置到 HOME 位置（确保机械臂处于已知安全位置）
+            RCLCPP_INFO(get_logger(), "Resetting %s arm to home position...", arm_config_.c_str());
+            controllers_[arm_idx]->reset_to_home();
+            RCLCPP_INFO(get_logger(), "Arm reset to home position.");
 
             // 读取初始状态（带验证和重试）
             bool initial_read_success = false;
