@@ -510,8 +510,9 @@ void Arx5ControllerBase::update_output_cmd_()
         if (delta_pos * sign > 0)
         {
             if (prev_gripper_updated_)
-                logger_->warn("Gripper torque is too large, gripper pos cmd is not updated");
-            output_joint_cmd_.gripper_pos = prev_output_cmd.gripper_pos;
+                logger_->warn("Gripper torque is too large, setting gripper pos cmd to current actual position");
+            // Set to current actual position to zero out position error and reduce torque
+            output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
             prev_gripper_updated_ = false;
         }
         else
