@@ -418,6 +418,9 @@ void Arx5ControllerBase::update_output_cmd_()
         output_joint_cmd_ = interpolator_.interpolate(timestamp);
     }
 
+    // 夹爪位置指令放大 2 倍
+    output_joint_cmd_.gripper_pos *= 2.0;
+
     std::lock_guard<std::mutex> guard(state_mutex_);
     if (controller_config_.gravity_compensation)
     {
