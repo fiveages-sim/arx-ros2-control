@@ -201,6 +201,16 @@ void ArxX5Hardware::declare_node_parameters()
     ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
     ensure_double_param("gripper_kp", kDefaultGripperKP, hw_find("gripper_kp"));
     ensure_double_param("gripper_kd", kDefaultGripperKD, hw_find("gripper_kd"));
+
+    // 双臂模式：左右臂独立增益（便于分别查看/设置左右臂，ros2 param get 可得到两行）
+    ensure_double_array_sized("left_joint_k_gains", kDefaultJointKGains, 6);
+    ensure_double_array_sized("left_joint_d_gains", kDefaultJointDGains, 6);
+    ensure_double_param("left_gripper_kp", kDefaultGripperKP, hw_find("left_gripper_kp"));
+    ensure_double_param("left_gripper_kd", kDefaultGripperKD, hw_find("left_gripper_kd"));
+    ensure_double_array_sized("right_joint_k_gains", kDefaultJointKGains, 6);
+    ensure_double_array_sized("right_joint_d_gains", kDefaultJointDGains, 6);
+    ensure_double_param("right_gripper_kp", kDefaultGripperKP, hw_find("right_gripper_kp"));
+    ensure_double_param("right_gripper_kd", kDefaultGripperKD, hw_find("right_gripper_kd"));
 }
 
 /**
@@ -490,11 +500,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     // 获取当前增益参数，如果长度不匹配则调整为6关节默认值
     std::vector<double> current_kp = get_node_param("joint_k_gains", kDefaultJointKGains);
     std::vector<double> current_kd = get_node_param("joint_d_gains", kDefaultJointDGains);
-    
+
     // 如果长度不匹配，使用6关节默认值并更新参数
     if (current_kp.size() != 6) {
         current_kp = kDefaultJointKGains;
-        // 重新声明参数以更新长度
         try {
             node_->undeclare_parameter("joint_k_gains");
         } catch (...) {}
@@ -509,12 +518,28 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
         node_->declare_parameter<std::vector<double>>("joint_d_gains", current_kd);
         RCLCPP_INFO(get_logger(), "Adjusted joint_d_gains to 6-joint default values");
     }
-    
+
     // 初始化增益缓存
     joint_k_gains_ = current_kp;
     joint_d_gains_ = current_kd;
     gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
+
+    // 双臂模式：加载左右臂独立增益，便于分别查看/设置（ros2 param get 得到两行）
+    if (arm_index_ == ARM_DUAL) {
+        left_joint_k_gains_ = get_node_param("left_joint_k_gains", kDefaultJointKGains);
+        left_joint_d_gains_ = get_node_param("left_joint_d_gains", kDefaultJointDGains);
+        left_gripper_kp_ = get_node_param("left_gripper_kp", kDefaultGripperKP);
+        left_gripper_kd_ = get_node_param("left_gripper_kd", kDefaultGripperKD);
+        right_joint_k_gains_ = get_node_param("right_joint_k_gains", kDefaultJointKGains);
+        right_joint_d_gains_ = get_node_param("right_joint_d_gains", kDefaultJointDGains);
+        right_gripper_kp_ = get_node_param("right_gripper_kp", kDefaultGripperKP);
+        right_gripper_kd_ = get_node_param("right_gripper_kd", kDefaultGripperKD);
+        if (left_joint_k_gains_.size() != 6) { left_joint_k_gains_ = kDefaultJointKGains; }
+        if (left_joint_d_gains_.size() != 6) { left_joint_d_gains_ = kDefaultJointDGains; }
+        if (right_joint_k_gains_.size() != 6) { right_joint_k_gains_ = kDefaultJointKGains; }
+        if (right_joint_d_gains_.size() != 6) { right_joint_d_gains_ = kDefaultJointDGains; }
+    }
 
     // 注册参数回调
     param_callback_handle_ = node_->add_on_set_parameters_callback(
@@ -853,14 +878,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 
         hardware_connected_ = true;
         
-        // 应用初始增益值
+        // 应用初始增益值（双臂时使用左右臂独立增益）
         if (arm_index_ == ARM_DUAL) {
-            applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
-            applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+            applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
+            applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
         } else {
             applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
         }
-        
+
         RCLCPP_INFO(get_logger(), "Successfully activated!");
         return hardware_interface::CallbackReturn::SUCCESS;
 
@@ -1188,9 +1213,10 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
     for (const auto & param : params) {
         // 检查硬件是否已连接（增益参数需要硬件连接）
         if (!hardware_connected_) {
-            // 对于增益参数，需要硬件连接
-            if (param.get_name() == "joint_k_gains" || param.get_name() == "joint_d_gains" ||
-                param.get_name() == "gripper_kp" || param.get_name() == "gripper_kd") {
+            const std::string& n = param.get_name();
+            if (n == "joint_k_gains" || n == "joint_d_gains" || n == "gripper_kp" || n == "gripper_kd" ||
+                n == "left_joint_k_gains" || n == "left_joint_d_gains" || n == "left_gripper_kp" || n == "left_gripper_kd" ||
+                n == "right_joint_k_gains" || n == "right_joint_d_gains" || n == "right_gripper_kp" || n == "right_gripper_kd") {
                 result.successful = false;
                 result.reason = "Hardware not connected. Cannot set gains.";
                 return result;
@@ -1209,13 +1235,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             
             joint_k_gains_ = new_kp;
+            if (arm_index_ == ARM_DUAL) {
+                left_joint_k_gains_ = new_kp;
+                right_joint_k_gains_ = new_kp;
+            }
             RCLCPP_INFO(get_logger(), "joint_k_gains updated via parameter");
-            
-            // 应用到硬件
             if (hardware_connected_) {
                 if (arm_index_ == ARM_DUAL) {
-                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
-                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
+                    applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
@@ -1233,13 +1261,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             
             joint_d_gains_ = new_kd;
+            if (arm_index_ == ARM_DUAL) {
+                left_joint_d_gains_ = new_kd;
+                right_joint_d_gains_ = new_kd;
+            }
             RCLCPP_INFO(get_logger(), "joint_d_gains updated via parameter");
-            
-            // 应用到硬件
             if (hardware_connected_) {
                 if (arm_index_ == ARM_DUAL) {
-                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
-                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
+                    applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
@@ -1254,13 +1284,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             
             gripper_kp_ = new_gripper_kp;
+            if (arm_index_ == ARM_DUAL) {
+                left_gripper_kp_ = new_gripper_kp;
+                right_gripper_kp_ = new_gripper_kp;
+            }
             RCLCPP_INFO(get_logger(), "gripper_kp updated to: %.2f", gripper_kp_);
-            
-            // 应用到硬件
             if (hardware_connected_) {
                 if (arm_index_ == ARM_DUAL) {
-                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
-                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
+                    applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
@@ -1275,17 +1307,92 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             
             gripper_kd_ = new_gripper_kd;
+            if (arm_index_ == ARM_DUAL) {
+                left_gripper_kd_ = new_gripper_kd;
+                right_gripper_kd_ = new_gripper_kd;
+            }
             RCLCPP_INFO(get_logger(), "gripper_kd updated to: %.2f", gripper_kd_);
-            
-            // 应用到硬件
             if (hardware_connected_) {
                 if (arm_index_ == ARM_DUAL) {
-                    applyGains(ARM_LEFT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
-                    applyGains(ARM_RIGHT, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                    applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
+                    applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
             }
+        }
+        // 双臂独立参数：仅 DUAL 时生效，分别查看/设置左右臂
+        else if (param.get_name() == "left_joint_k_gains" && arm_index_ == ARM_DUAL) {
+            std::vector<double> new_kp = param.as_double_array();
+            if (new_kp.size() != 6) {
+                result.successful = false;
+                result.reason = "left_joint_k_gains must have exactly 6 values";
+                return result;
+            }
+            left_joint_k_gains_ = new_kp;
+            RCLCPP_INFO(get_logger(), "left_joint_k_gains updated via parameter");
+            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+        }
+        else if (param.get_name() == "right_joint_k_gains" && arm_index_ == ARM_DUAL) {
+            std::vector<double> new_kp = param.as_double_array();
+            if (new_kp.size() != 6) {
+                result.successful = false;
+                result.reason = "right_joint_k_gains must have exactly 6 values";
+                return result;
+            }
+            right_joint_k_gains_ = new_kp;
+            RCLCPP_INFO(get_logger(), "right_joint_k_gains updated via parameter");
+            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+        }
+        else if (param.get_name() == "left_joint_d_gains" && arm_index_ == ARM_DUAL) {
+            std::vector<double> new_kd = param.as_double_array();
+            if (new_kd.size() != 6) {
+                result.successful = false;
+                result.reason = "left_joint_d_gains must have exactly 6 values";
+                return result;
+            }
+            left_joint_d_gains_ = new_kd;
+            RCLCPP_INFO(get_logger(), "left_joint_d_gains updated via parameter");
+            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+        }
+        else if (param.get_name() == "right_joint_d_gains" && arm_index_ == ARM_DUAL) {
+            std::vector<double> new_kd = param.as_double_array();
+            if (new_kd.size() != 6) {
+                result.successful = false;
+                result.reason = "right_joint_d_gains must have exactly 6 values";
+                return result;
+            }
+            right_joint_d_gains_ = new_kd;
+            RCLCPP_INFO(get_logger(), "right_joint_d_gains updated via parameter");
+            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+        }
+        else if (param.get_name() == "left_gripper_kp" && arm_index_ == ARM_DUAL) {
+            double v = param.as_double();
+            if (v < 0.0) { result.successful = false; result.reason = "left_gripper_kp must be >= 0"; return result; }
+            left_gripper_kp_ = v;
+            RCLCPP_INFO(get_logger(), "left_gripper_kp updated to: %.2f", left_gripper_kp_);
+            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+        }
+        else if (param.get_name() == "right_gripper_kp" && arm_index_ == ARM_DUAL) {
+            double v = param.as_double();
+            if (v < 0.0) { result.successful = false; result.reason = "right_gripper_kp must be >= 0"; return result; }
+            right_gripper_kp_ = v;
+            RCLCPP_INFO(get_logger(), "right_gripper_kp updated to: %.2f", right_gripper_kp_);
+            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+        }
+        else if (param.get_name() == "left_gripper_kd" && arm_index_ == ARM_DUAL) {
+            double v = param.as_double();
+            if (v < 0.0) { result.successful = false; result.reason = "left_gripper_kd must be >= 0"; return result; }
+            left_gripper_kd_ = v;
+            RCLCPP_INFO(get_logger(), "left_gripper_kd updated to: %.2f", left_gripper_kd_);
+            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+        }
+        else if (param.get_name() == "right_gripper_kd" && arm_index_ == ARM_DUAL) {
+            double v = param.as_double();
+            if (v < 0.0) { result.successful = false; result.reason = "right_gripper_kd must be >= 0"; return result; }
+            right_gripper_kd_ = v;
+            RCLCPP_INFO(get_logger(), "right_gripper_kd updated to: %.2f", right_gripper_kd_);
+            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
         }
     }
 
