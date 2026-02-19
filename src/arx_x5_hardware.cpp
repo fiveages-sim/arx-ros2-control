@@ -1145,7 +1145,8 @@ hardware_interface::return_type ArxX5Hardware::write(
                 left_cmd.pos[i] = position_commands_[i];
             }
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
-                left_cmd.gripper_pos = gripper_position_commands_[0];
+                // 控制器指令范围 [0, gripper_width/2]，缩放到物理范围 [0, gripper_width]
+                left_cmd.gripper_pos = gripper_position_commands_[0] * 2.0;
             }
             controllers_[ARM_LEFT]->set_joint_cmd(left_cmd);
 
@@ -1158,7 +1159,8 @@ hardware_interface::return_type ArxX5Hardware::write(
                 }
             }
             if (has_gripper_ && gripper_joint_names_.size() >= 2) {
-                right_cmd.gripper_pos = gripper_position_commands_[1];
+                // 控制器指令范围 [0, gripper_width/2]，缩放到物理范围 [0, gripper_width]
+                right_cmd.gripper_pos = gripper_position_commands_[1] * 2.0;
             }
             controllers_[ARM_RIGHT]->set_joint_cmd(right_cmd);
 
@@ -1181,7 +1183,8 @@ hardware_interface::return_type ArxX5Hardware::write(
 
             // 设置夹爪命令
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
-                cmd.gripper_pos = gripper_position_commands_[0];
+                // 控制器指令范围 [0, gripper_width/2]，缩放到物理范围 [0, gripper_width]
+                cmd.gripper_pos = gripper_position_commands_[0] * 2.0;
             }
 
             // 发送命令到SDK
