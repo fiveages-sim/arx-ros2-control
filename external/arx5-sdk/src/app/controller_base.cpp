@@ -323,7 +323,8 @@ void Arx5ControllerBase::over_current_protection_()
     if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max)
     {
         over_current = true;
-        logger_->error("Over current detected once on gripper, current: {:.3f}", joint_state_.gripper_torque);
+        logger_->error("Over current detected once on gripper, torque: {:.3f} Nm (max: {:.3f} Nm)",
+                       joint_state_.gripper_torque, robot_config_.gripper_torque_max);
     }
     if (over_current)
     {
@@ -509,13 +510,15 @@ void Arx5ControllerBase::update_output_cmd_()
     // 力矩保护：检测夹爪是否卡住，若指令位置在受阻方向偏离实际位置则跟随当前位置以降低力矩
     if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max / 2)
     {
-        double sign = joint_state_.gripper_torque > 0 ? 1 : -1; // 1=张开被挡，-1=闭合被挡
+        double sign = joint_state_.gripper_torque > 0 ? -1 : 1; // -1=闭合被挡(正力矩=闭合方向)，1=张开被挡
         double pos_error =
             output_joint_cmd_.gripper_pos - joint_state_.gripper_pos; // 指令与实际位置的偏差
         if (pos_error * sign > 0) // 指令在受阻方向上偏离实际位置（即位置误差在产生力矩）
         {
             if (prev_gripper_updated_)
-                logger_->info("Gripper torque is too large, setting gripper pos cmd to current actual position");
+                logger_->info("Gripper stalled (torque: {:.3f} Nm > {:.3f} Nm), holding position at {:.4f} m",
+                              joint_state_.gripper_torque, robot_config_.gripper_torque_max / 2,
+                              joint_state_.gripper_pos);
             // Set to current actual position to zero out position error and reduce torque
             output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
             prev_gripper_updated_ = false;
