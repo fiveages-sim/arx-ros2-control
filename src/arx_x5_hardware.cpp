@@ -8,8 +8,8 @@
 namespace arx_x5_ros2_control {
 
     // 默认增益值（6关节 X5 机械臂）
-    static const std::vector<double> kDefaultJointKGains = {80.0, 70.0, 65.0, 22.0, 22.0, 14.0};
-    static const std::vector<double> kDefaultJointDGains = {2.6, 2.6, 2.3, 0.85, 0.85, 0.6};
+    static const std::vector<double> kDefaultJointKGains = {80.0, 70.0, 70.0, 30.0, 30.0, 20.0};
+    static const std::vector<double> kDefaultJointDGains = {2.0, 2.0, 2.0, 1.0, 1.0, 0.7};
     static const double kDefaultGripperKP = 5.0;
     static const double kDefaultGripperKD = 0.2;
 
