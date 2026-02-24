@@ -16,14 +16,6 @@ namespace arx_ros2_control {
     // 真机夹爪：SDK 使用 [0, 0.088] m，URDF/仿真使用 [0, 0.044] m。状态上报时 ÷2 使仿真/可视化一致。
     static constexpr double kGripperPosScaleToRos = 0.5;
 
-    // 辅助函数：字符串标准化（转大写）
-    static std::string normalizeString(const std::string& str)
-    {
-        std::string result = str;
-        std::transform(result.begin(), result.end(), result.begin(), ::toupper);
-        return result;
-    }
-
     // 辅助函数：解析 hardware_parameters 中的数组字符串为 vector<double>
     // 支持形如 "[1,2,3]"、"1, 2, 3"、"1 2 3" 等格式
     static std::vector<double> parseDoubleArrayLoose(const std::string& str, const std::vector<double>& default_val)
