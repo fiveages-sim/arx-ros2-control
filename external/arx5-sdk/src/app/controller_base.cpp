@@ -508,7 +508,7 @@ void Arx5ControllerBase::update_output_cmd_()
         output_joint_cmd_.gripper_pos = robot_config_.gripper_width;
     }
     // 力矩保护：检测夹爪是否卡住，若指令位置在受阻方向偏离实际位置则跟随当前位置以降低力矩
-    if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max / 2)
+    if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max * 0.7)
     {
         double sign = joint_state_.gripper_torque > 0 ? -1 : 1; // -1=闭合被挡(正力矩=闭合方向)，1=张开被挡
         double pos_error =
@@ -517,7 +517,7 @@ void Arx5ControllerBase::update_output_cmd_()
         {
             if (prev_gripper_updated_)
                 logger_->info("Gripper stalled (torque: {:.3f} Nm > {:.3f} Nm), holding position at {:.4f} m",
-                              joint_state_.gripper_torque, robot_config_.gripper_torque_max / 2,
+                              joint_state_.gripper_torque, robot_config_.gripper_torque_max * 0.7,
                               joint_state_.gripper_pos);
             // Set to current actual position to zero out position error and reduce torque
             output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
