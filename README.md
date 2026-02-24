@@ -49,7 +49,7 @@ conda activate arx-py312
 ```bash
 # 确保在 SDK 目录下
 conda activate arx-py312
-cd ~/ros2_ws/src/arms_ros2_control/hardwares/arx_x5_ros2_control/external/arx5-sdk
+cd ~/ros2_ws/src/arms_ros2_control/hardwares/arx_ros2_control/external/arx5-sdk
 
 # 创建构建目录
 mkdir -p build
@@ -75,7 +75,7 @@ make -j$(nproc)
 
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select arx_x5_ros2_control
+colcon build --packages-select arx_ros2_control
 ```
 
 

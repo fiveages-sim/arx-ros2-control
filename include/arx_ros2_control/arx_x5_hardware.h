@@ -12,8 +12,9 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
-namespace arx_x5_ros2_control {
+namespace arx_ros2_control {
 
     // 臂配置常量
     constexpr int ARM_LEFT = 0;
@@ -83,6 +84,24 @@ private:
     // 硬件连接状态标志
     bool hardware_connected_ = false;
 
+    // 参数回调句柄
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+
+    // 增益参数缓存（用于动态调整）
+    std::vector<double> joint_k_gains_;      // 关节位置增益（单臂或双臂共用默认）
+    std::vector<double> joint_d_gains_;      // 关节阻尼增益
+    double gripper_kp_ = 5.0;                // 夹爪位置增益
+    double gripper_kd_ = 0.2;                // 夹爪阻尼增益
+    // 双臂模式下的左右臂独立增益（仅 ARM_DUAL 时使用）
+    std::vector<double> left_joint_k_gains_;
+    std::vector<double> left_joint_d_gains_;
+    double left_gripper_kp_ = 5.0;
+    double left_gripper_kd_ = 0.2;
+    std::vector<double> right_joint_k_gains_;
+    std::vector<double> right_joint_d_gains_;
+    double right_gripper_kp_ = 5.0;
+    double right_gripper_kd_ = 0.2;
+
     // 配置参数
     std::string arm_config_;       // 臂配置: "LEFT", "RIGHT", "DUAL"
     int arm_index_;                // 0=LEFT, 1=RIGHT, 2=DUAL
@@ -142,6 +161,13 @@ private:
 
     // 声明节点参数
     void declare_node_parameters();
+
+    // 参数回调函数
+    rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
+
+    // 应用增益到硬件
+    void applyGains(int arm_index, const std::vector<double>& kp, const std::vector<double>& kd, 
+                     double gripper_kp, double gripper_kd);
 };
 
-}  // namespace arx_x5_ros2_control
+}  // namespace arx_ros2_control

@@ -323,7 +323,8 @@ void Arx5ControllerBase::over_current_protection_()
     if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max)
     {
         over_current = true;
-        logger_->error("Over current detected once on gripper, current: {:.3f}", joint_state_.gripper_torque);
+        logger_->error("Over current detected once on gripper, torque: {:.3f} Nm (max: {:.3f} Nm)",
+                       joint_state_.gripper_torque, robot_config_.gripper_torque_max);
     }
     if (over_current)
     {
@@ -467,51 +468,59 @@ void Arx5ControllerBase::update_output_cmd_()
             output_joint_cmd_.pos[i] = joint_state_.pos[i];
         }
 
-        // Gripper pos clipping
+        // Gripper pos clipping - 夹爪位置限速与旁路逻辑
         if (gain_.gripper_kp > 0)
         {
+            // 计算本周期内夹爪的目标位置变化量
             double gripper_delta_pos = output_joint_cmd_.gripper_pos - prev_output_cmd.gripper_pos;
+            // 若计算出的速度 (变化量/dt) 超过配置的最大速度，则进行限速
             if (std::abs(gripper_delta_pos) / dt > robot_config_.gripper_vel_max)
             {
+                // 在保持运动方向的前提下，将步进量限制为 gripper_vel_max*dt
                 double new_gripper_pos = prev_output_cmd.gripper_pos + robot_config_.gripper_vel_max * dt *
                                                                            gripper_delta_pos /
                                                                            std::abs(gripper_delta_pos);
                 if (std::abs(output_joint_cmd_.gripper_pos - output_joint_cmd_.gripper_pos) >= 0.001)
-                    logger_->debug("Gripper pos cmd clipped: {:.3f} to {:.3f}", output_joint_cmd_.gripper_pos,
+                    logger_->info("Gripper pos cmd clipped: {:.3f} to {:.3f}", output_joint_cmd_.gripper_pos,
                                    output_joint_cmd_.gripper_pos);
                 output_joint_cmd_.gripper_pos = new_gripper_pos;
             }
         }
         else
         {
+            // gripper_kp<=0 时关闭夹爪控制，直接使用当前反馈位置（跟随关节状态）
             output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
         }
     }
 
-    // Gripper pos clipping
+    // Gripper pos clipping - 夹爪位置物理范围限幅 [0, gripper_width]
     if (output_joint_cmd_.gripper_pos < 0)
     {
         if (output_joint_cmd_.gripper_pos < -0.005)
-            logger_->debug("Gripper pos cmd clipped from {:.3f} to min: {:.3f}", output_joint_cmd_.gripper_pos, 0.0);
+            logger_->info("Gripper pos cmd clipped from {:.3f} to min: {:.3f}", output_joint_cmd_.gripper_pos, 0.0);
         output_joint_cmd_.gripper_pos = 0;
     }
     else if (output_joint_cmd_.gripper_pos > robot_config_.gripper_width)
     {
         if (output_joint_cmd_.gripper_pos > robot_config_.gripper_width + 0.005)
-            logger_->debug("Gripper pos cmd clipped from {:.3f} to max: {:.3f}", output_joint_cmd_.gripper_pos,
+            logger_->info("Gripper pos cmd clipped from {:.3f} to max: {:.3f}", output_joint_cmd_.gripper_pos,
                            robot_config_.gripper_width);
         output_joint_cmd_.gripper_pos = robot_config_.gripper_width;
     }
+    // 力矩保护：检测夹爪是否卡住，若指令位置在受阻方向偏离实际位置则跟随当前位置以降低力矩
     if (std::abs(joint_state_.gripper_torque) > robot_config_.gripper_torque_max / 2)
     {
-        double sign = joint_state_.gripper_torque > 0 ? 1 : -1; // -1 for closing blocked, 1 for opening blocked
-        double delta_pos =
-            output_joint_cmd_.gripper_pos - prev_output_cmd.gripper_pos; // negative for closing, positive for opening
-        if (delta_pos * sign > 0)
+        double sign = joint_state_.gripper_torque > 0 ? -1 : 1; // -1=闭合被挡(正力矩=闭合方向)，1=张开被挡
+        double pos_error =
+            output_joint_cmd_.gripper_pos - joint_state_.gripper_pos; // 指令与实际位置的偏差
+        if (pos_error * sign > 0) // 指令在受阻方向上偏离实际位置（即位置误差在产生力矩）
         {
             if (prev_gripper_updated_)
-                logger_->warn("Gripper torque is too large, gripper pos cmd is not updated");
-            output_joint_cmd_.gripper_pos = prev_output_cmd.gripper_pos;
+                logger_->info("Gripper stalled (torque: {:.3f} Nm > {:.3f} Nm), holding position at {:.4f} m",
+                              joint_state_.gripper_torque, robot_config_.gripper_torque_max / 2,
+                              joint_state_.gripper_pos);
+            // Set to current actual position to zero out position error and reduce torque
+            output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
             prev_gripper_updated_ = false;
         }
         else
@@ -537,13 +546,13 @@ void Arx5ControllerBase::update_output_cmd_()
     // Gripper torque clipping
     if (output_joint_cmd_.gripper_torque > robot_config_.gripper_torque_max)
     {
-        logger_->debug("Gripper torque cmd clipped from {:.3f} to max {:.3f}", output_joint_cmd_.gripper_torque,
+        logger_->info("Gripper torque cmd clipped from {:.3f} to max {:.3f}", output_joint_cmd_.gripper_torque,
                        robot_config_.gripper_torque_max);
         output_joint_cmd_.gripper_torque = robot_config_.gripper_torque_max;
     }
     else if (output_joint_cmd_.gripper_torque < -robot_config_.gripper_torque_max)
     {
-        logger_->debug("Gripper torque cmd clipped from {:.3f} to min {:.3f}", output_joint_cmd_.gripper_torque,
+        logger_->info("Gripper torque cmd clipped from {:.3f} to min {:.3f}", output_joint_cmd_.gripper_torque,
                        -robot_config_.gripper_torque_max);
         output_joint_cmd_.gripper_torque = -robot_config_.gripper_torque_max;
     }
