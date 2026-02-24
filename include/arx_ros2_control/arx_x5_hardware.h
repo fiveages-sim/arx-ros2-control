@@ -14,7 +14,7 @@
 #include <optional>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 
-namespace arx_x5_ros2_control {
+namespace arx_ros2_control {
 
     // 臂配置常量
     constexpr int ARM_LEFT = 0;
@@ -170,4 +170,4 @@ private:
                      double gripper_kp, double gripper_kd);
 };
 
-}  // namespace arx_x5_ros2_control
+}  // namespace arx_ros2_control

@@ -480,7 +480,7 @@ void Arx5ControllerBase::update_output_cmd_()
                                                                            gripper_delta_pos /
                                                                            std::abs(gripper_delta_pos);
                 if (std::abs(output_joint_cmd_.gripper_pos - output_joint_cmd_.gripper_pos) >= 0.001)
-                    logger_->debug("Gripper pos cmd clipped: {:.3f} to {:.3f}", output_joint_cmd_.gripper_pos,
+                    logger_->info("Gripper pos cmd clipped: {:.3f} to {:.3f}", output_joint_cmd_.gripper_pos,
                                    output_joint_cmd_.gripper_pos);
                 output_joint_cmd_.gripper_pos = new_gripper_pos;
             }
@@ -496,13 +496,13 @@ void Arx5ControllerBase::update_output_cmd_()
     if (output_joint_cmd_.gripper_pos < 0)
     {
         if (output_joint_cmd_.gripper_pos < -0.005)
-            logger_->debug("Gripper pos cmd clipped from {:.3f} to min: {:.3f}", output_joint_cmd_.gripper_pos, 0.0);
+            logger_->info("Gripper pos cmd clipped from {:.3f} to min: {:.3f}", output_joint_cmd_.gripper_pos, 0.0);
         output_joint_cmd_.gripper_pos = 0;
     }
     else if (output_joint_cmd_.gripper_pos > robot_config_.gripper_width)
     {
         if (output_joint_cmd_.gripper_pos > robot_config_.gripper_width + 0.005)
-            logger_->debug("Gripper pos cmd clipped from {:.3f} to max: {:.3f}", output_joint_cmd_.gripper_pos,
+            logger_->info("Gripper pos cmd clipped from {:.3f} to max: {:.3f}", output_joint_cmd_.gripper_pos,
                            robot_config_.gripper_width);
         output_joint_cmd_.gripper_pos = robot_config_.gripper_width;
     }
@@ -515,7 +515,7 @@ void Arx5ControllerBase::update_output_cmd_()
         if (pos_error * sign > 0) // 指令在受阻方向上偏离实际位置（即位置误差在产生力矩）
         {
             if (prev_gripper_updated_)
-                logger_->warn("Gripper torque is too large, setting gripper pos cmd to current actual position");
+                logger_->info("Gripper torque is too large, setting gripper pos cmd to current actual position");
             // Set to current actual position to zero out position error and reduce torque
             output_joint_cmd_.gripper_pos = joint_state_.gripper_pos;
             prev_gripper_updated_ = false;
@@ -543,13 +543,13 @@ void Arx5ControllerBase::update_output_cmd_()
     // Gripper torque clipping
     if (output_joint_cmd_.gripper_torque > robot_config_.gripper_torque_max)
     {
-        logger_->debug("Gripper torque cmd clipped from {:.3f} to max {:.3f}", output_joint_cmd_.gripper_torque,
+        logger_->info("Gripper torque cmd clipped from {:.3f} to max {:.3f}", output_joint_cmd_.gripper_torque,
                        robot_config_.gripper_torque_max);
         output_joint_cmd_.gripper_torque = robot_config_.gripper_torque_max;
     }
     else if (output_joint_cmd_.gripper_torque < -robot_config_.gripper_torque_max)
     {
-        logger_->debug("Gripper torque cmd clipped from {:.3f} to min {:.3f}", output_joint_cmd_.gripper_torque,
+        logger_->info("Gripper torque cmd clipped from {:.3f} to min {:.3f}", output_joint_cmd_.gripper_torque,
                        -robot_config_.gripper_torque_max);
         output_joint_cmd_.gripper_torque = -robot_config_.gripper_torque_max;
     }

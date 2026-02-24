@@ -286,13 +286,13 @@ controller.calibrate_gripper()
 |------|----------|
 | 自适应夹爪控制器 | `controller/adaptive_gripper_controller/src/adaptive_gripper_controller.cpp` |
 | 控制器头文件 | `controller/adaptive_gripper_controller/include/adaptive_gripper_controller/adaptive_gripper_controller.h` |
-| Hardware Interface 实现 | `hardwares/arx_x5_ros2_control/src/arx_x5_hardware.cpp` |
-| Hardware Interface 头文件 | `hardwares/arx_x5_ros2_control/include/arx_x5_ros2_control/arx_x5_hardware.h` |
-| SDK 控制器基类 (保护逻辑) | `hardwares/arx_x5_ros2_control/external/arx5-sdk/src/app/controller_base.cpp` |
-| SDK 关节控制器 | `hardwares/arx_x5_ros2_control/external/arx5-sdk/src/app/joint_controller.cpp` |
-| SDK 数据结构 | `hardwares/arx_x5_ros2_control/external/arx5-sdk/include/app/common.h` |
-| SDK 机器人配置 | `hardwares/arx_x5_ros2_control/external/arx5-sdk/include/app/config.h` |
-| SDK CAN 通信 | `hardwares/arx_x5_ros2_control/external/arx5-sdk/include/hardware/arx_can.h` |
+| Hardware Interface 实现 | `hardwares/arx_ros2_control/src/arx_x5_hardware.cpp` |
+| Hardware Interface 头文件 | `hardwares/arx_ros2_control/include/arx_ros2_control/arx_x5_hardware.h` |
+| SDK 控制器基类 (保护逻辑) | `hardwares/arx_ros2_control/external/arx5-sdk/src/app/controller_base.cpp` |
+| SDK 关节控制器 | `hardwares/arx_ros2_control/external/arx5-sdk/src/app/joint_controller.cpp` |
+| SDK 数据结构 | `hardwares/arx_ros2_control/external/arx5-sdk/include/app/common.h` |
+| SDK 机器人配置 | `hardwares/arx_ros2_control/external/arx5-sdk/include/app/config.h` |
+| SDK CAN 通信 | `hardwares/arx_ros2_control/external/arx5-sdk/include/hardware/arx_can.h` |
 | 控制器配置 (yaml) | `robot_descriptions/.../config/ros2_control/ros2_controllers.yaml` |
 
 > 路径相对于 `/home/z/ros2_ws/src/arms_ros2_control/`

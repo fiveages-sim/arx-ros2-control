@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(arx_x5_ros2_control LANGUAGES CXX)
+project(arx_ros2_control LANGUAGES CXX)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
   add_compile_options(-Wall -Wextra -Werror=return-type)
@@ -69,7 +69,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 )
 
 # ============== 导出插件 ==============
-pluginlib_export_plugin_description_file(hardware_interface arx_x5_ros2_control.xml)
+pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control.xml)
 
 # ============== 设置 RPATH ==============
 # 确保运行时能找到 SDK 库

@@ -1,17 +1,20 @@
-#include "arx_x5_ros2_control/arx_x5_hardware.h"
+#include "arx_ros2_control/arx_x5_hardware.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <algorithm>
 #include <unistd.h>  // for usleep
 #include <sstream>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 
-namespace arx_x5_ros2_control {
+namespace arx_ros2_control {
 
     // 默认增益值（6关节 X5 机械臂）
     static const std::vector<double> kDefaultJointKGains = {80.0, 70.0, 70.0, 30.0, 30.0, 20.0};
     static const std::vector<double> kDefaultJointDGains = {2.0, 2.0, 2.0, 1.0, 1.0, 0.7};
     static const double kDefaultGripperKP = 5.0;
     static const double kDefaultGripperKD = 0.2;
+
+    // 真机夹爪：SDK 使用 [0, 0.088] m，URDF/仿真使用 [0, 0.044] m。状态上报时 ÷2 使仿真/可视化一致。
+    static constexpr double kGripperPosScaleToRos = 0.5;
 
     // 辅助函数：字符串标准化（转大写）
     static std::string normalizeString(const std::string& str)
@@ -768,15 +771,15 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 }
             }
 
-            // 初始化夹爪状态（双臂模式：左臂和右臂各一个夹爪）
+            // 初始化夹爪状态（双臂模式：左臂和右臂各一个夹爪），转为 ROS 侧 [0, 0.044]
             if (has_gripper_) {
                 if (gripper_joint_names_.size() >= 1) {
-                    gripper_position_states_[0] = left_state.gripper_pos;
-                    gripper_position_commands_[0] = left_state.gripper_pos;
+                    gripper_position_states_[0] = left_state.gripper_pos * kGripperPosScaleToRos;
+                    gripper_position_commands_[0] = left_state.gripper_pos * kGripperPosScaleToRos;
                 }
                 if (gripper_joint_names_.size() >= 2) {
-                    gripper_position_states_[1] = right_state.gripper_pos;
-                    gripper_position_commands_[1] = right_state.gripper_pos;
+                    gripper_position_states_[1] = right_state.gripper_pos * kGripperPosScaleToRos;
+                    gripper_position_commands_[1] = right_state.gripper_pos * kGripperPosScaleToRos;
                 }
             }
 
@@ -858,10 +861,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 position_commands_[i] = initial_state.pos[i];
             }
 
-            // 初始化夹爪状态
+            // 初始化夹爪状态，转为 ROS 侧 [0, 0.044]
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
-                gripper_position_states_[0] = initial_state.gripper_pos;
-                gripper_position_commands_[0] = initial_state.gripper_pos;
+                gripper_position_states_[0] = initial_state.gripper_pos * kGripperPosScaleToRos;
+                gripper_position_commands_[0] = initial_state.gripper_pos * kGripperPosScaleToRos;
             }
         }
 
@@ -1059,16 +1062,16 @@ hardware_interface::return_type ArxX5Hardware::read(
                 }
             }
 
-            // 更新夹爪状态（双臂模式：左臂和右臂各一个夹爪）
+            // 更新夹爪状态（双臂模式），SDK [0, 0.088] 转为 ROS [0, 0.044]
             if (has_gripper_) {
                 if (gripper_joint_names_.size() >= 1) {
-                    validate_and_update(left_state.gripper_pos, gripper_position_states_[0], "Left gripper position", 0);
-                    validate_and_update(left_state.gripper_vel, gripper_velocity_states_[0], "Left gripper velocity", 0);
+                    validate_and_update(left_state.gripper_pos * kGripperPosScaleToRos, gripper_position_states_[0], "Left gripper position", 0);
+                    validate_and_update(left_state.gripper_vel * kGripperPosScaleToRos, gripper_velocity_states_[0], "Left gripper velocity", 0);
                     validate_and_update(left_state.gripper_torque, gripper_effort_states_[0], "Left gripper effort", 0);
                 }
                 if (gripper_joint_names_.size() >= 2) {
-                    validate_and_update(right_state.gripper_pos, gripper_position_states_[1], "Right gripper position", 1);
-                    validate_and_update(right_state.gripper_vel, gripper_velocity_states_[1], "Right gripper velocity", 1);
+                    validate_and_update(right_state.gripper_pos * kGripperPosScaleToRos, gripper_position_states_[1], "Right gripper position", 1);
+                    validate_and_update(right_state.gripper_vel * kGripperPosScaleToRos, gripper_velocity_states_[1], "Right gripper velocity", 1);
                     validate_and_update(right_state.gripper_torque, gripper_effort_states_[1], "Right gripper effort", 1);
                 }
             }
@@ -1087,10 +1090,10 @@ hardware_interface::return_type ArxX5Hardware::read(
                 validate_and_update(state.torque[i], effort_states_[i], "Joint effort", i);
             }
 
-            // 更新夹爪状态
+            // 更新夹爪状态，SDK [0, 0.088] 转为 ROS [0, 0.044]
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
-                validate_and_update(state.gripper_pos, gripper_position_states_[0], "Gripper position", 0);
-                validate_and_update(state.gripper_vel, gripper_velocity_states_[0], "Gripper velocity", 0);
+                validate_and_update(state.gripper_pos * kGripperPosScaleToRos, gripper_position_states_[0], "Gripper position", 0);
+                validate_and_update(state.gripper_vel * kGripperPosScaleToRos, gripper_velocity_states_[0], "Gripper velocity", 0);
                 validate_and_update(state.gripper_torque, gripper_effort_states_[0], "Gripper effort", 0);
             }
         }
@@ -1462,7 +1465,7 @@ void ArxX5Hardware::applyGains(int arm_index, const std::vector<double>& kp,
     }
 }
 
-}  // namespace arx_x5_ros2_control
+}  // namespace arx_ros2_control
 
 /**
  * @brief 注册硬件接口插件
@@ -1470,6 +1473,6 @@ void ArxX5Hardware::applyGains(int arm_index, const std::vector<double>& kp,
  * 将 ArxX5Hardware 类注册为 ros2_control 的 SystemInterface 插件。
  * ros2_control 通过 pluginlib 动态加载此硬件接口。
  *
- * 配合 arx_x5_ros2_control.xml 插件描述文件使用。
+ * 配合 arx_ros2_control.xml 插件描述文件使用。
  */
-PLUGINLIB_EXPORT_CLASS(arx_x5_ros2_control::ArxX5Hardware, hardware_interface::SystemInterface)
+PLUGINLIB_EXPORT_CLASS(arx_ros2_control::ArxX5Hardware, hardware_interface::SystemInterface)
