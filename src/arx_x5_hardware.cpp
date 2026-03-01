@@ -278,6 +278,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     }
 
     // 解析关节：区分左臂和右臂关节
+    // 关节名称来源：params.hardware_info.joints 由 ros2_control 在 on_init 时传入，其内容
+    // 来自机器人 URDF/xacro 中 <ros2_control> 块内定义的 <joint name="..."> 列表；启动时
+    // 框架从 robot_description 解析 URDF，将对应硬件组件的关节列表填入 params，故修改
+    // 关节名称或数量需在机器人的 ros2_control 描述文件（如 arx5_description 的 xacro）中修改。
     has_gripper_ = false;
     gripper_joint_names_.clear();
     joint_names_.clear();
@@ -382,28 +386,28 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
  *
  * 控制器通过这些接口获取关节的实时位置、速度和力矩反馈
  */
-std::vector<hardware_interface::StateInterface> ArxX5Hardware::export_state_interfaces() {
-    std::vector<hardware_interface::StateInterface> state_interfaces;
+std::vector<hardware_interface::StateInterface::ConstSharedPtr> ArxX5Hardware::on_export_state_interfaces() {
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> state_interfaces;
 
     // 导出关节状态接口
     for (size_t i = 0; i < joint_count_; ++i) {
-        state_interfaces.emplace_back(
-            joint_names_[i], hardware_interface::HW_IF_POSITION, &position_states_[i]);
-        state_interfaces.emplace_back(
-            joint_names_[i], hardware_interface::HW_IF_VELOCITY, &velocity_states_[i]);
-        state_interfaces.emplace_back(
-            joint_names_[i], hardware_interface::HW_IF_EFFORT, &effort_states_[i]);
+        state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+            joint_names_[i], hardware_interface::HW_IF_POSITION, &position_states_[i]));
+        state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+            joint_names_[i], hardware_interface::HW_IF_VELOCITY, &velocity_states_[i]));
+        state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+            joint_names_[i], hardware_interface::HW_IF_EFFORT, &effort_states_[i]));
     }
 
     // 导出夹爪状态接口（支持多个夹爪关节）
     if (has_gripper_) {
         for (size_t i = 0; i < gripper_joint_names_.size(); ++i) {
-            state_interfaces.emplace_back(
-                gripper_joint_names_[i], hardware_interface::HW_IF_POSITION, &gripper_position_states_[i]);
-            state_interfaces.emplace_back(
-                gripper_joint_names_[i], hardware_interface::HW_IF_VELOCITY, &gripper_velocity_states_[i]);
-            state_interfaces.emplace_back(
-                gripper_joint_names_[i], hardware_interface::HW_IF_EFFORT, &gripper_effort_states_[i]);
+            state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+                gripper_joint_names_[i], hardware_interface::HW_IF_POSITION, &gripper_position_states_[i]));
+            state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+                gripper_joint_names_[i], hardware_interface::HW_IF_VELOCITY, &gripper_velocity_states_[i]));
+            state_interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(
+                gripper_joint_names_[i], hardware_interface::HW_IF_EFFORT, &gripper_effort_states_[i]));
         }
     }
 
@@ -422,20 +426,20 @@ std::vector<hardware_interface::StateInterface> ArxX5Hardware::export_state_inte
  *
  * 控制器通过这些接口发送目标位置指令给硬件
  */
-std::vector<hardware_interface::CommandInterface> ArxX5Hardware::export_command_interfaces() {
-    std::vector<hardware_interface::CommandInterface> command_interfaces;
+std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_export_command_interfaces() {
+    std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
     // 导出关节命令接口
     for (size_t i = 0; i < joint_count_; ++i) {
-        command_interfaces.emplace_back(
-            joint_names_[i], hardware_interface::HW_IF_POSITION, &position_commands_[i]);
+        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+            joint_names_[i], hardware_interface::HW_IF_POSITION, &position_commands_[i]));
     }
 
     // 导出夹爪命令接口（支持多个夹爪关节）
     if (has_gripper_) {
         for (size_t i = 0; i < gripper_joint_names_.size(); ++i) {
-            command_interfaces.emplace_back(
-                gripper_joint_names_[i], hardware_interface::HW_IF_POSITION, &gripper_position_commands_[i]);
+            command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+                gripper_joint_names_[i], hardware_interface::HW_IF_POSITION, &gripper_position_commands_[i]));
         }
     }
 
@@ -499,17 +503,17 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     // 如果长度不匹配，使用6关节默认值并更新参数
     if (current_kp.size() != 6) {
         current_kp = kDefaultJointKGains;
-        try {
+        if (node_->has_parameter("joint_k_gains")) {
             node_->undeclare_parameter("joint_k_gains");
-        } catch (...) {}
+        }
         node_->declare_parameter<std::vector<double>>("joint_k_gains", current_kp);
         RCLCPP_INFO(get_logger(), "Adjusted joint_k_gains to 6-joint default values");
     }
     if (current_kd.size() != 6) {
         current_kd = kDefaultJointDGains;
-        try {
+        if (node_->has_parameter("joint_d_gains")) {
             node_->undeclare_parameter("joint_d_gains");
-        } catch (...) {}
+        }
         node_->declare_parameter<std::vector<double>>("joint_d_gains", current_kd);
         RCLCPP_INFO(get_logger(), "Adjusted joint_d_gains to 6-joint default values");
     }
@@ -553,13 +557,21 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
  * 生命周期：inactive -> unconfigured 状态转换时调用
  *
  * 主要工作：
- * 1. 确保硬件已断开连接
- * 2. 重置状态，准备重新配置
+ * 1. 移除 configure 阶段注册的参数回调
+ * 2. 确保硬件已断开连接（若未在 deactivate 断开则在此兜底）
+ * 3. 清理命令缓冲区，准备重新配置
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
     RCLCPP_INFO(get_logger(), "Cleaning up ArxX5 Hardware Interface...");
+
+    // 释放 configure 阶段注册的参数回调
+    if (node_ && param_callback_handle_) {
+        node_->get_node_parameters_interface()
+            ->remove_on_set_parameters_callback(param_callback_handle_.get());
+        param_callback_handle_.reset();
+    }
 
     // 确保硬件已断开
     if (hardware_connected_) {
@@ -602,16 +614,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
     const int max_read_attempts = 10;
     const int read_interval_ms = 100;
 
-    // 辅助函数：检查关节状态是否全零（可能表示硬件未就绪）
-    auto is_all_zeros = [](const arx::JointState& state, size_t count) -> bool {
-        for (size_t i = 0; i < count && i < static_cast<size_t>(state.pos.size()); ++i) {
-            if (std::abs(state.pos[i]) > 1e-6) {
-                return false;
-            }
-        }
-        return true;
-    };
-
     // 辅助函数：检查关节状态是否包含 NaN/Inf
     auto has_invalid_values = [](const arx::JointState& state, size_t count) -> bool {
         for (size_t i = 0; i < count && i < static_cast<size_t>(state.pos.size()); ++i) {
@@ -644,7 +646,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 
             // 读取左臂初始状态（带验证和重试）
             bool left_success = false;
-            bool left_all_zeros_detected = false;
             arx::JointState left_state(left_joint_count_);
 
             for (int attempt = 0; attempt < max_read_attempts; ++attempt) {
@@ -654,15 +655,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                     if (has_invalid_values(left_state, left_joint_count_)) {
                         RCLCPP_WARN(get_logger(),
                             "Left arm initial state contains NaN/Inf (attempt %d/%d), retrying...",
-                            attempt + 1, max_read_attempts);
-                        usleep(read_interval_ms * 1000);
-                        continue;
-                    }
-
-                    if (is_all_zeros(left_state, left_joint_count_)) {
-                        left_all_zeros_detected = true;
-                        RCLCPP_WARN(get_logger(),
-                            "Left arm initial positions are all zeros (attempt %d/%d), retrying...",
                             attempt + 1, max_read_attempts);
                         usleep(read_interval_ms * 1000);
                         continue;
@@ -684,10 +676,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             if (!left_success) {
                 RCLCPP_ERROR(get_logger(), "Failed to read valid left arm initial state after %d attempts",
                             max_read_attempts);
-                if (left_all_zeros_detected) {
-                    RCLCPP_ERROR(get_logger(), "Left arm hardware appears to be returning all zeros. "
-                               "Please check: 1) Hardware power, 2) CAN connection, 3) Motor initialization.");
-                }
                 controllers_[0].reset();
                 controllers_[1].reset();
                 return hardware_interface::CallbackReturn::ERROR;
@@ -695,7 +683,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 
             // 读取右臂初始状态（带验证和重试）
             bool right_success = false;
-            bool right_all_zeros_detected = false;
             arx::JointState right_state(right_joint_count_);
 
             for (int attempt = 0; attempt < max_read_attempts; ++attempt) {
@@ -705,15 +692,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                     if (has_invalid_values(right_state, right_joint_count_)) {
                         RCLCPP_WARN(get_logger(),
                             "Right arm initial state contains NaN/Inf (attempt %d/%d), retrying...",
-                            attempt + 1, max_read_attempts);
-                        usleep(read_interval_ms * 1000);
-                        continue;
-                    }
-
-                    if (is_all_zeros(right_state, right_joint_count_)) {
-                        right_all_zeros_detected = true;
-                        RCLCPP_WARN(get_logger(),
-                            "Right arm initial positions are all zeros (attempt %d/%d), retrying...",
                             attempt + 1, max_read_attempts);
                         usleep(read_interval_ms * 1000);
                         continue;
@@ -735,10 +713,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             if (!right_success) {
                 RCLCPP_ERROR(get_logger(), "Failed to read valid right arm initial state after %d attempts",
                             max_read_attempts);
-                if (right_all_zeros_detected) {
-                    RCLCPP_ERROR(get_logger(), "Right arm hardware appears to be returning all zeros. "
-                               "Please check: 1) Hardware power, 2) CAN connection, 3) Motor initialization.");
-                }
                 controllers_[0].reset();
                 controllers_[1].reset();
                 return hardware_interface::CallbackReturn::ERROR;
@@ -794,7 +768,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 
             // 读取初始状态（带验证和重试）
             bool initial_read_success = false;
-            bool all_zeros_detected = false;
             arx::JointState initial_state(joint_count_);
 
             for (int attempt = 0; attempt < max_read_attempts; ++attempt) {
@@ -805,17 +778,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                     if (has_invalid_values(initial_state, joint_count_)) {
                         RCLCPP_WARN(get_logger(),
                             "Initial joint state contains NaN/Inf (attempt %d/%d), retrying...",
-                            attempt + 1, max_read_attempts);
-                        usleep(read_interval_ms * 1000);
-                        continue;
-                    }
-
-                    // 检查全零
-                    if (is_all_zeros(initial_state, joint_count_)) {
-                        all_zeros_detected = true;
-                        RCLCPP_WARN(get_logger(),
-                            "Initial joint positions are all zeros (attempt %d/%d), "
-                            "this may indicate uninitialized hardware. Retrying...",
                             attempt + 1, max_read_attempts);
                         usleep(read_interval_ms * 1000);
                         continue;
@@ -837,10 +799,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             if (!initial_read_success) {
                 RCLCPP_ERROR(get_logger(), "Failed to read valid initial joint state after %d attempts",
                             max_read_attempts);
-                if (all_zeros_detected) {
-                    RCLCPP_ERROR(get_logger(), "Hardware appears to be returning all zeros. "
-                               "Please check: 1) Hardware power, 2) CAN connection, 3) Motor initialization.");
-                }
                 controllers_[arm_idx].reset();
                 return hardware_interface::CallbackReturn::ERROR;
             }

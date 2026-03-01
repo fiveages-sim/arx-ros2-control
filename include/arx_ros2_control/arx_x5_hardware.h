@@ -30,10 +30,10 @@ public:
         const hardware_interface::HardwareComponentInterfaceParams& params) override;
 
     // 导出状态接口 (position, velocity, effort)
-    std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
 
     // 导出命令接口 (position)
-    std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+    std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
 
     // 配置 (解析参数、验证配置，但不连接硬件)
     hardware_interface::CallbackReturn on_configure(
