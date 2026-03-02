@@ -456,8 +456,9 @@ std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_e
  * 主要工作：
  * 1. 验证配置参数的有效性
  * 2. 记录配置信息
+ * 3. 创建控制器并建立与硬件的连接（轻量探测：get_joint_state 一次证明通讯通）
  *
- * 此阶段不连接硬件，仅验证配置是否正确
+ * 此阶段目标：证明硬件在线 + 通讯通，不执行 reset_to_home（使能/归零在 on_activate）
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
@@ -482,40 +483,16 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
         RCLCPP_INFO(get_logger(), "  Gripper: %zu joint(s)", gripper_joint_names_.size());
     }
 
-    // 根据实际关节数量调整增益参数长度
-    // 注意：在 on_configure 时，关节数量已经确定（在 on_init 中解析）
-    // 当前只支持6关节机械臂（X5）
-    size_t expected_joint_count = (arm_index_ == ARM_DUAL) ? 
-        std::max(left_joint_count_, right_joint_count_) : joint_count_;
-    
-    // 验证关节数量是否为6（当前只支持6关节）
-    if (expected_joint_count != 6) {
-        RCLCPP_WARN(get_logger(), 
-                    "Expected 6 joints for X5 robot, but got %zu joints. Using 6-joint default gains.",
-                    expected_joint_count);
-        expected_joint_count = 6;
-    }
-    
-    // 获取当前增益参数，如果长度不匹配则调整为6关节默认值
+    // 读取增益参数到缓存（声明与长度矫正已在 on_init 的 declare_node_parameters 中完成，此处不再 undeclare/declare）
     std::vector<double> current_kp = get_node_param("joint_k_gains", kDefaultJointKGains);
     std::vector<double> current_kd = get_node_param("joint_d_gains", kDefaultJointDGains);
-
-    // 如果长度不匹配，使用6关节默认值并更新参数
     if (current_kp.size() != 6) {
+        RCLCPP_WARN(get_logger(), "joint_k_gains size is %zu, expected 6; using default for cache.", current_kp.size());
         current_kp = kDefaultJointKGains;
-        if (node_->has_parameter("joint_k_gains")) {
-            node_->undeclare_parameter("joint_k_gains");
-        }
-        node_->declare_parameter<std::vector<double>>("joint_k_gains", current_kp);
-        RCLCPP_INFO(get_logger(), "Adjusted joint_k_gains to 6-joint default values");
     }
     if (current_kd.size() != 6) {
+        RCLCPP_WARN(get_logger(), "joint_d_gains size is %zu, expected 6; using default for cache.", current_kd.size());
         current_kd = kDefaultJointDGains;
-        if (node_->has_parameter("joint_d_gains")) {
-            node_->undeclare_parameter("joint_d_gains");
-        }
-        node_->declare_parameter<std::vector<double>>("joint_d_gains", current_kd);
-        RCLCPP_INFO(get_logger(), "Adjusted joint_d_gains to 6-joint default values");
     }
 
     // 初始化增益缓存
@@ -545,7 +522,34 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
         std::bind(&ArxX5Hardware::paramCallback, this, std::placeholders::_1));
     RCLCPP_INFO(get_logger(), "Parameter callback registered. Use 'ros2 param set' to change gains dynamically.");
 
-    RCLCPP_INFO(get_logger(), "Configuration complete. Ready to activate.");
+    // 建立连接：创建控制器（硬件是否在线在 activate 时通过 reset_to_home / 读状态验证）
+    try {
+        if (arm_index_ == ARM_DUAL) {
+            RCLCPP_INFO(get_logger(), "Connecting dual-arm: Left=%s on %s, Right=%s on %s",
+                        left_robot_model_.c_str(), left_can_interface_.c_str(),
+                        right_robot_model_.c_str(), right_can_interface_.c_str());
+            controllers_[ARM_LEFT] = std::make_shared<arx::Arx5JointController>(
+                left_robot_model_, left_can_interface_);
+            controllers_[ARM_RIGHT] = std::make_shared<arx::Arx5JointController>(
+                right_robot_model_, right_can_interface_);
+        } else {
+            const int arm_idx = arm_index_;
+            const std::string& model = (arm_idx == ARM_LEFT) ? left_robot_model_ : right_robot_model_;
+            const std::string& can_if = (arm_idx == ARM_LEFT) ? left_can_interface_ : right_can_interface_;
+            RCLCPP_INFO(get_logger(), "Connecting %s arm: %s on %s",
+                        arm_config_.c_str(), model.c_str(), can_if.c_str());
+            controllers_[arm_idx] = std::make_shared<arx::Arx5JointController>(model, can_if);
+        }
+        hardware_connected_ = true;
+        RCLCPP_INFO(get_logger(), "Hardware connected. Configuration complete. Ready to activate.");
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(get_logger(), "Failed to connect or probe hardware: %s", e.what());
+        hardware_connected_ = false;
+        controllers_[0].reset();
+        controllers_[1].reset();
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -566,14 +570,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
 
     RCLCPP_INFO(get_logger(), "Cleaning up ArxX5 Hardware Interface...");
 
-    // 释放 configure 阶段注册的参数回调
-    if (node_ && param_callback_handle_) {
-        node_->get_node_parameters_interface()
-            ->remove_on_set_parameters_callback(param_callback_handle_.get());
-        param_callback_handle_.reset();
-    }
+    // 释放 configure 阶段注册的参数回调（仅 reset handle，析构时由 rclcpp 解绑，避免跨版本 remove API 差异导致幽灵回调）
+    param_callback_handle_.reset();
 
-    // 确保硬件已断开
+    control_active_ = false;
     if (hardware_connected_) {
         RCLCPP_WARN(get_logger(), "Hardware still connected during cleanup, disconnecting...");
         hardware_connected_ = false;
@@ -597,18 +597,33 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
  *
  * 生命周期：inactive -> active 状态转换时调用
  *
- * 主要工作：
- * 1. 根据配置创建 ARX SDK 控制器实例
- *    - 单臂模式：创建一个控制器
- *    - 双臂模式：创建左右两个控制器
- * 2. 连接到真实硬件（通过 CAN 接口）
- * 3. 读取当前关节状态作为初始值
- * 4. 将初始位置同时设为命令值（避免激活时跳变）
+ * 主要工作（连接已在 on_configure 建立，此处仅使能并拿到有效状态）：
+ * 1. 校验已连接（hardware_connected_ 与 controllers_）
+ * 2. 执行 Enable/Homing：reset_to_home()
+ * 3. 循环读取 get_joint_state() 直至有效（无 NaN/Inf）
+ * 4. 将初始位置设为命令值（避免激活时跳变）
+ * 5. 预分配命令缓冲区、应用增益
  *
- * 错误处理：如果连接失败，清理已创建的控制器并返回 ERROR
+ * 错误处理：若使能或读状态失败，清理控制器并返回 ERROR
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
+
+    if (!hardware_connected_) {
+        RCLCPP_ERROR(get_logger(), "Cannot activate: hardware not connected (configure first).");
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+    if (arm_index_ == ARM_DUAL) {
+        if (!controllers_[ARM_LEFT] || !controllers_[ARM_RIGHT]) {
+            RCLCPP_ERROR(get_logger(), "Cannot activate: dual-arm requires both controllers (one is null).");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+    } else {
+        if (!controllers_[arm_index_]) {
+            RCLCPP_ERROR(get_logger(), "Cannot activate: controller for arm index %d is null.", arm_index_);
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+    }
 
     // 初始状态验证参数
     const int max_read_attempts = 10;
@@ -626,18 +641,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 
     try {
         if (arm_index_ == ARM_DUAL) {
-            // 双臂模式：创建两个控制器
             RCLCPP_INFO(get_logger(),
-                        "Activating dual-arm: Left=%s on %s, Right=%s on %s",
-                        left_robot_model_.c_str(), left_can_interface_.c_str(),
-                        right_robot_model_.c_str(), right_can_interface_.c_str());
+                        "Activating dual-arm: reset_to_home and waiting for valid state...");
 
-            controllers_[ARM_LEFT] = std::make_shared<arx::Arx5JointController>(
-                left_robot_model_, left_can_interface_);
-            controllers_[ARM_RIGHT] = std::make_shared<arx::Arx5JointController>(
-                right_robot_model_, right_can_interface_);
-
-            // 重置到 HOME 位置（确保机械臂处于已知安全位置）
+            // 重置到 HOME 位置（使能/归零，硬件要求）
             RCLCPP_INFO(get_logger(), "Resetting left arm to home position...");
             controllers_[ARM_LEFT]->reset_to_home();
             RCLCPP_INFO(get_logger(), "Resetting right arm to home position...");
@@ -752,16 +759,9 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         } else {
             // 单臂模式
             const int arm_idx = arm_index_;
-            const std::string& model = (arm_idx == ARM_LEFT) ? left_robot_model_ : right_robot_model_;
-            const std::string& can_if = (arm_idx == ARM_LEFT) ? left_can_interface_ : right_can_interface_;
+            RCLCPP_INFO(get_logger(), "Activating %s arm: reset_to_home and waiting for valid state...", arm_config_.c_str());
 
-            RCLCPP_INFO(get_logger(),
-                        "Activating %s arm: %s on %s",
-                        arm_config_.c_str(), model.c_str(), can_if.c_str());
-
-            controllers_[arm_idx] = std::make_shared<arx::Arx5JointController>(model, can_if);
-
-            // 重置到 HOME 位置（确保机械臂处于已知安全位置）
+            // 重置到 HOME 位置（使能/归零，硬件要求）
             RCLCPP_INFO(get_logger(), "Resetting %s arm to home position...", arm_config_.c_str());
             controllers_[arm_idx]->reset_to_home();
             RCLCPP_INFO(get_logger(), "Arm reset to home position.");
@@ -829,8 +829,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffer: %zu joints", joint_count_);
         }
 
-        hardware_connected_ = true;
-        
         // 应用初始增益值（双臂时使用左右臂独立增益）
         if (arm_index_ == ARM_DUAL) {
             applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
@@ -839,13 +837,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
         }
 
+        control_active_ = true;
         RCLCPP_INFO(get_logger(), "Successfully activated!");
         return hardware_interface::CallbackReturn::SUCCESS;
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(),
                      "Failed to activate: %s", e.what());
-        // 清理已创建的控制器
+        control_active_ = false;
         hardware_connected_ = false;
         controllers_[0].reset();
         controllers_[1].reset();
@@ -860,29 +859,20 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
  *
  * 生命周期：active -> inactive 状态转换时调用
  *
- * 主要工作：
- * 1. 释放 ARX SDK 控制器实例
- * 2. 断开与硬件的连接
+ * 语义（方案 A - 停控不断连）：
+ * - configure 建立连接，activate 使能；deactivate 仅停控，不断开连接。
+ * - hardware_connected_ 与 controllers_ 保持不变，下次 activate 无需重新 configure。
  *
- * 停用后硬件将停止接收命令，关节保持当前位置
+ * 主要工作：
+ * 1. 清理命令缓冲区（停止下发新命令）
+ * 2. 不断连、不释放控制器，便于再次 activate 时快速使能
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
-    RCLCPP_INFO(get_logger(), "Deactivating...");
+    RCLCPP_INFO(get_logger(), "Deactivating (keeping connection for next activate)...");
 
-    // 标记硬件已断开连接
-    hardware_connected_ = false;
-
-    // 释放控制器
-    if (arm_index_ == ARM_DUAL) {
-        controllers_[ARM_LEFT].reset();
-        controllers_[ARM_RIGHT].reset();
-    } else {
-        controllers_[arm_index_].reset();
-    }
-
-    // 清理命令缓冲区
+    control_active_ = false;  // 之后 read/write 均 noop，不再访问硬件
     left_cmd_buffer_.reset();
     right_cmd_buffer_.reset();
     single_cmd_buffer_.reset();
@@ -908,7 +898,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_error(
 
     RCLCPP_ERROR(get_logger(), "Error in ArxX5 Hardware Interface");
 
-    // 标记硬件已断开连接
+    control_active_ = false;
     hardware_connected_ = false;
 
     // 安全释放控制器
@@ -940,7 +930,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_shutdown(
 
     RCLCPP_INFO(get_logger(), "Shutting down ArxX5 Hardware Interface...");
 
-    // 确保硬件已断开
+    control_active_ = false;
     if (hardware_connected_) {
         hardware_connected_ = false;
         controllers_[0].reset();
@@ -970,14 +960,27 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_shutdown(
  * 3. 双臂模式下分别读取左右臂状态
  * 4. 同时更新夹爪状态
  *
+ * inactive（control_active_ == false）时：直接返回 OK，不访问硬件（noop）。
  * 数据流：ARX SDK -> position_states_/velocity_states_/effort_states_ -> 控制器
  */
 hardware_interface::return_type ArxX5Hardware::read(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
 
+    if (!control_active_) {
+        return hardware_interface::return_type::OK;  // inactive/unconfigured 不读写，非错误
+    }
     if (!hardware_connected_) {
-        return hardware_interface::return_type::ERROR;
+        return hardware_interface::return_type::ERROR;  // active 时必须在线
+    }
+    if (arm_index_ == ARM_DUAL) {
+        if (!controllers_[ARM_LEFT] || !controllers_[ARM_RIGHT]) {
+            return hardware_interface::return_type::ERROR;  // 防止 dereference nullptr
+        }
+    } else {
+        if (!controllers_[arm_index_]) {
+            return hardware_interface::return_type::ERROR;
+        }
     }
 
     // 辅助 lambda：校验并更新状态值，无效值保留上一次的值
@@ -1072,14 +1075,27 @@ hardware_interface::return_type ArxX5Hardware::read(
  * 4. 双臂模式下分别向左右臂发送命令
  * 5. 同时发送夹爪命令
  *
+ * inactive（control_active_ == false）时：直接返回 OK，不访问硬件（noop）。
  * 数据流：控制器 -> position_commands_ -> ARX SDK -> 电机
  */
 hardware_interface::return_type ArxX5Hardware::write(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
 
+    if (!control_active_) {
+        return hardware_interface::return_type::OK;  // inactive/unconfigured 不读写，非错误
+    }
     if (!hardware_connected_) {
-        return hardware_interface::return_type::ERROR;
+        return hardware_interface::return_type::ERROR;  // active 时必须在线
+    }
+    if (arm_index_ == ARM_DUAL) {
+        if (!controllers_[ARM_LEFT] || !controllers_[ARM_RIGHT]) {
+            return hardware_interface::return_type::ERROR;  // 防止 dereference nullptr
+        }
+    } else {
+        if (!controllers_[arm_index_]) {
+            return hardware_interface::return_type::ERROR;
+        }
     }
 
     try {
@@ -1165,20 +1181,10 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
 {
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
+    bool gain_cached_not_applied = false;  // 有增益仅缓存、未立即下发时置 true，用于末尾提示
 
     for (const auto & param : params) {
-        // 检查硬件是否已连接（增益参数需要硬件连接）
-        if (!hardware_connected_) {
-            const std::string& n = param.get_name();
-            if (n == "joint_k_gains" || n == "joint_d_gains" || n == "gripper_kp" || n == "gripper_kd" ||
-                n == "left_joint_k_gains" || n == "left_joint_d_gains" || n == "left_gripper_kp" || n == "left_gripper_kd" ||
-                n == "right_joint_k_gains" || n == "right_joint_d_gains" || n == "right_gripper_kp" || n == "right_gripper_kd") {
-                result.successful = false;
-                result.reason = "Hardware not connected. Cannot set gains.";
-                return result;
-            }
-        }
-
+        // 增益参数：未连接也可设置（仅缓存），连接且 activate 时才 apply；只有“需立即写硬件”时才要求在线
         if (param.get_name() == "joint_k_gains") {
             std::vector<double> new_kp = param.as_double_array();
             // 当前只支持6关节机械臂
@@ -1196,13 +1202,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 right_joint_k_gains_ = new_kp;
             }
             RCLCPP_INFO(get_logger(), "joint_k_gains updated via parameter");
-            if (hardware_connected_) {
+            if (hardware_connected_ && control_active_) {
                 if (arm_index_ == ARM_DUAL) {
                     applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
                     applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
+            } else {
+                gain_cached_not_applied = true;
             }
         }
         else if (param.get_name() == "joint_d_gains") {
@@ -1222,13 +1230,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 right_joint_d_gains_ = new_kd;
             }
             RCLCPP_INFO(get_logger(), "joint_d_gains updated via parameter");
-            if (hardware_connected_) {
+            if (hardware_connected_ && control_active_) {
                 if (arm_index_ == ARM_DUAL) {
                     applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
                     applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
+            } else {
+                gain_cached_not_applied = true;
             }
         }
         else if (param.get_name() == "gripper_kp") {
@@ -1245,13 +1255,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 right_gripper_kp_ = new_gripper_kp;
             }
             RCLCPP_INFO(get_logger(), "gripper_kp updated to: %.2f", gripper_kp_);
-            if (hardware_connected_) {
+            if (hardware_connected_ && control_active_) {
                 if (arm_index_ == ARM_DUAL) {
                     applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
                     applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
+            } else {
+                gain_cached_not_applied = true;
             }
         }
         else if (param.get_name() == "gripper_kd") {
@@ -1268,13 +1280,15 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 right_gripper_kd_ = new_gripper_kd;
             }
             RCLCPP_INFO(get_logger(), "gripper_kd updated to: %.2f", gripper_kd_);
-            if (hardware_connected_) {
+            if (hardware_connected_ && control_active_) {
                 if (arm_index_ == ARM_DUAL) {
                     applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
                     applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
                 } else {
                     applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
                 }
+            } else {
+                gain_cached_not_applied = true;
             }
         }
         // 双臂独立参数：仅 DUAL 时生效，分别查看/设置左右臂
@@ -1287,7 +1301,8 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             left_joint_k_gains_ = new_kp;
             RCLCPP_INFO(get_logger(), "left_joint_k_gains updated via parameter");
-            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "right_joint_k_gains" && arm_index_ == ARM_DUAL) {
             std::vector<double> new_kp = param.as_double_array();
@@ -1298,7 +1313,8 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             right_joint_k_gains_ = new_kp;
             RCLCPP_INFO(get_logger(), "right_joint_k_gains updated via parameter");
-            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "left_joint_d_gains" && arm_index_ == ARM_DUAL) {
             std::vector<double> new_kd = param.as_double_array();
@@ -1309,7 +1325,8 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             left_joint_d_gains_ = new_kd;
             RCLCPP_INFO(get_logger(), "left_joint_d_gains updated via parameter");
-            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "right_joint_d_gains" && arm_index_ == ARM_DUAL) {
             std::vector<double> new_kd = param.as_double_array();
@@ -1320,38 +1337,46 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             right_joint_d_gains_ = new_kd;
             RCLCPP_INFO(get_logger(), "right_joint_d_gains updated via parameter");
-            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "left_gripper_kp" && arm_index_ == ARM_DUAL) {
             double v = param.as_double();
             if (v < 0.0) { result.successful = false; result.reason = "left_gripper_kp must be >= 0"; return result; }
             left_gripper_kp_ = v;
             RCLCPP_INFO(get_logger(), "left_gripper_kp updated to: %.2f", left_gripper_kp_);
-            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "right_gripper_kp" && arm_index_ == ARM_DUAL) {
             double v = param.as_double();
             if (v < 0.0) { result.successful = false; result.reason = "right_gripper_kp must be >= 0"; return result; }
             right_gripper_kp_ = v;
             RCLCPP_INFO(get_logger(), "right_gripper_kp updated to: %.2f", right_gripper_kp_);
-            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "left_gripper_kd" && arm_index_ == ARM_DUAL) {
             double v = param.as_double();
             if (v < 0.0) { result.successful = false; result.reason = "left_gripper_kd must be >= 0"; return result; }
             left_gripper_kd_ = v;
             RCLCPP_INFO(get_logger(), "left_gripper_kd updated to: %.2f", left_gripper_kd_);
-            if (hardware_connected_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
         else if (param.get_name() == "right_gripper_kd" && arm_index_ == ARM_DUAL) {
             double v = param.as_double();
             if (v < 0.0) { result.successful = false; result.reason = "right_gripper_kd must be >= 0"; return result; }
             right_gripper_kd_ = v;
             RCLCPP_INFO(get_logger(), "right_gripper_kd updated to: %.2f", right_gripper_kd_);
-            if (hardware_connected_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            if (hardware_connected_ && control_active_) { applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_); }
+            else { gain_cached_not_applied = true; }
         }
     }
 
+    if (gain_cached_not_applied) {
+        RCLCPP_INFO(get_logger(), "Gain parameter(s) cached; will be applied when connected and activated.");
+    }
     return result;
 }
 

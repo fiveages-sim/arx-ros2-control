@@ -47,7 +47,7 @@ public:
     hardware_interface::CallbackReturn on_activate(
         const rclcpp_lifecycle::State& previous_state) override;
 
-    // 停用 (断开连接)
+    // 停用 (停控不断连，read/write 不再访问硬件)
     hardware_interface::CallbackReturn on_deactivate(
         const rclcpp_lifecycle::State& previous_state) override;
 
@@ -81,8 +81,11 @@ private:
     // ARX5 SDK控制器（支持单臂和双臂）
     std::shared_ptr<arx::Arx5JointController> controllers_[2];  // [0]=左臂, [1]=右臂
 
-    // 硬件连接状态标志
+    // 硬件连接状态标志（configure 建连为 true，cleanup/error/shutdown 才置 false）
     bool hardware_connected_ = false;
+
+    // 控制使能标志（activate 为 true，deactivate 为 false）；inactive 时 read/write 均 noop
+    bool control_active_ = false;
 
     // 参数回调句柄
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
