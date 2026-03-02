@@ -208,37 +208,46 @@ void ArxX5Hardware::declare_node_parameters()
     ensure_double_param("right_gripper_kd", kDefaultGripperKD, hw_find("right_gripper_kd"));
 }
 
+// =============================================================================
+// 生命周期回调（按调用顺序：on_init -> on_configure -> on_activate -> on_deactivate
+// -> on_cleanup -> on_shutdown；on_error 可在任意状态由框架调用）
+// =============================================================================
+
 /**
- * @brief 硬件接口初始化回调
+ * @brief 硬件接口初始化回调（插件初始化）
  * @param params 硬件组件参数，包含 URDF 中定义的关节和参数信息
  * @return SUCCESS 表示初始化成功，ERROR 表示失败
  *
- * 生命周期：在 ros2_control 加载硬件插件时调用（unconfigured -> inactive 之前）
+ * 生命周期：ros2_control 特有阶段，不属于标准 ROS2 lifecycle；在插件被加载时由框架调用，
+ * 之后会立即调用 on_export_state_interfaces / on_export_command_interfaces 绑定状态与命令数组。
  *
- * 主要工作：
- * 1. 调用父类初始化
- * 2. 获取 ROS2 节点和日志器
- * 3. 声明并读取配置参数（arm_config, robot_model, can_interface 等）
- * 4. 解析 URDF 中的关节信息，区分机械臂关节和夹爪关节
- * 5. 根据单臂/双臂模式分配关节到左臂或右臂
- * 6. 初始化状态和命令数组
+ * 必须做的事：
+ * 1. 调用父类 on_init（第一步，失败则直接返回 ERROR）
+ * 2. 获取节点与日志器（node_ = get_node(); logger_ = ...）
+ * 3. 声明所有 ROS2 参数（集中在 declare_node_parameters()，如 arm_config、robot_model、can_interface、增益等）
+ * 4. 解析 URDF 关节列表（遍历 params.hardware_info.joints），区分机械臂关节与夹爪关节，按单臂/双臂分配
+ * 5. 按关节数分配状态/命令数组（resize 所有 *_states_ 与 *_commands_）
+ * 6. 初始化 SDK 控制器指针为 nullptr（本阶段不连接硬件）
+ *
+ * 不做的事：不连接硬件、不注册参数回调、不分配命令 buffer（这些在 on_configure / on_activate 完成）
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     const hardware_interface::HardwareComponentInterfaceParams& params) {
 
+    // 1. 调用父类 on_init（失败则直接返回 ERROR）
     if (hardware_interface::SystemInterface::on_init(params) !=
         hardware_interface::CallbackReturn::SUCCESS) {
         return hardware_interface::CallbackReturn::ERROR;
     }
 
-    // 获取节点和日志器
+    // 2. 获取节点与日志器
     node_ = get_node();
     logger_ = get_node()->get_logger();
 
-    // 声明节点参数
+    // 3. 声明所有 ROS2 参数（arm_config、robot_model、can_interface、增益等）
     declare_node_parameters();
 
-    // 解析arm_config参数
+    // 4. 解析 URDF 关节列表：先读 arm_config 与单/双臂参数，再遍历 joints 区分机械臂/夹爪、按左/右分配
     std::string arm_config_raw = get_node_param("arm_config", std::string("LEFT"));
     arm_config_ = normalizeString(arm_config_raw);
     
@@ -325,11 +334,11 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         }
     }
     
-    // 计算关节数量
+    // 4.（续）计算关节数量与夹爪数量
     joint_count_ = joint_names_.size();
     left_joint_count_ = left_joint_names_.size();
     right_joint_count_ = right_joint_names_.size();
-    
+
     if (arm_index_ == ARM_DUAL) {
         RCLCPP_INFO(get_logger(),
                     "Dual-arm configuration: left=%zu joints, right=%zu joints, total=%zu joints",
@@ -349,7 +358,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         }
     }
 
-    // 初始化状态和命令数组
+    // 5. 按关节数分配状态/命令数组（resize 所有 *_states_ 与 *_commands_）
     position_states_.resize(joint_count_, 0.0);
     velocity_states_.resize(joint_count_, 0.0);
     effort_states_.resize(joint_count_, 0.0);
@@ -363,7 +372,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         gripper_position_commands_.resize(gripper_count, 0.0);
     }
 
-    // 初始化控制器指针
+    // 6. 初始化 SDK 控制器指针为 nullptr（本阶段不连接硬件、不注册参数回调、不分配命令 buffer）
     controllers_[0] = nullptr;
     controllers_[1] = nullptr;
 
@@ -447,43 +456,28 @@ std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_e
 }
 
 /**
- * @brief 硬件配置回调
+ * @brief 硬件配置回调（Unconfigured → Inactive）
  * @param previous_state 之前的生命周期状态（未使用）
  * @return SUCCESS 表示配置成功，ERROR 表示失败
  *
- * 生命周期：unconfigured -> inactive 状态转换时调用
+ * 生命周期：Unconfigured → Inactive 状态转换时调用。与 on_cleanup() 对称：configure 里建立的，
+ * cleanup 里释放。
  *
- * 主要工作：
- * 1. 验证配置参数的有效性
- * 2. 记录配置信息
- * 3. 创建控制器并建立与硬件的连接（轻量探测：get_joint_state 一次证明通讯通）
+ * 必须做的事：
+ * 1. 读取并缓存参数 — get_node_param() 读取已声明的参数（如增益），存入成员变量
+ * 2. 注册参数回调 — add_on_set_parameters_callback，在 on_cleanup 中移除
+ * 3. 连接硬件 — 创建 SDK 控制器（Arx5JointController）、打开 CAN，连接级校验（通讯通即可）
+ * 4. 置连接标志 — hardware_connected_ = true
  *
- * 此阶段目标：证明硬件在线 + 通讯通，不执行 reset_to_home（使能/归零在 on_activate）
+ * 连接级校验原则：证明链路通（构造成功即可；本实现将“读一次状态”的验证放在 on_activate 的
+ * reset_to_home/读状态中）。不要求硬件进入可控状态（使能/归零等在 on_activate 中完成）。
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
     RCLCPP_INFO(get_logger(), "Configuring ArxX5 Hardware Interface...");
 
-    // 验证配置参数
-    if (arm_index_ == ARM_DUAL) {
-        RCLCPP_INFO(get_logger(), "Configuration: Dual-arm mode");
-        RCLCPP_INFO(get_logger(), "  Left arm: model=%s, CAN=%s, joints=%zu",
-                    left_robot_model_.c_str(), left_can_interface_.c_str(), left_joint_count_);
-        RCLCPP_INFO(get_logger(), "  Right arm: model=%s, CAN=%s, joints=%zu",
-                    right_robot_model_.c_str(), right_can_interface_.c_str(), right_joint_count_);
-    } else {
-        const std::string& model = (arm_index_ == ARM_LEFT) ? left_robot_model_ : right_robot_model_;
-        const std::string& can_if = (arm_index_ == ARM_LEFT) ? left_can_interface_ : right_can_interface_;
-        RCLCPP_INFO(get_logger(), "Configuration: %s arm mode, model=%s, CAN=%s, joints=%zu",
-                    arm_config_.c_str(), model.c_str(), can_if.c_str(), joint_count_);
-    }
-
-    if (has_gripper_) {
-        RCLCPP_INFO(get_logger(), "  Gripper: %zu joint(s)", gripper_joint_names_.size());
-    }
-
-    // 读取增益参数到缓存（声明与长度矫正已在 on_init 的 declare_node_parameters 中完成，此处不再 undeclare/declare）
+    // 1. 读取并缓存参数（增益等；声明与长度矫正已在 on_init 的 declare_node_parameters 中完成）
     std::vector<double> current_kp = get_node_param("joint_k_gains", kDefaultJointKGains);
     std::vector<double> current_kd = get_node_param("joint_d_gains", kDefaultJointDGains);
     if (current_kp.size() != 6) {
@@ -494,14 +488,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
         RCLCPP_WARN(get_logger(), "joint_d_gains size is %zu, expected 6; using default for cache.", current_kd.size());
         current_kd = kDefaultJointDGains;
     }
-
-    // 初始化增益缓存
     joint_k_gains_ = current_kp;
     joint_d_gains_ = current_kd;
     gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
-
-    // 双臂模式：加载左右臂独立增益，便于分别查看/设置（ros2 param get 得到两行）
     if (arm_index_ == ARM_DUAL) {
         left_joint_k_gains_ = get_node_param("left_joint_k_gains", kDefaultJointKGains);
         left_joint_d_gains_ = get_node_param("left_joint_d_gains", kDefaultJointDGains);
@@ -517,12 +507,12 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
         if (right_joint_d_gains_.size() != 6) { right_joint_d_gains_ = kDefaultJointDGains; }
     }
 
-    // 注册参数回调
+    // 2. 注册参数回调（在 on_cleanup 中移除）
     param_callback_handle_ = node_->add_on_set_parameters_callback(
         std::bind(&ArxX5Hardware::paramCallback, this, std::placeholders::_1));
     RCLCPP_INFO(get_logger(), "Parameter callback registered. Use 'ros2 param set' to change gains dynamically.");
 
-    // 建立连接：创建控制器（硬件是否在线在 activate 时通过 reset_to_home / 读状态验证）
+    // 3. 连接硬件：创建 SDK 控制器（通讯通验证在 on_activate 中做）
     try {
         if (arm_index_ == ARM_DUAL) {
             RCLCPP_INFO(get_logger(), "Connecting dual-arm: Left=%s on %s, Right=%s on %s",
@@ -540,6 +530,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
                         arm_config_.c_str(), model.c_str(), can_if.c_str());
             controllers_[arm_idx] = std::make_shared<arx::Arx5JointController>(model, can_if);
         }
+        // 4. 置连接标志
         hardware_connected_ = true;
         RCLCPP_INFO(get_logger(), "Hardware connected. Configuration complete. Ready to activate.");
     } catch (const std::exception& e) {
@@ -554,61 +545,27 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
 }
 
 /**
- * @brief 硬件清理回调
- * @param previous_state 之前的生命周期状态（未使用）
- * @return SUCCESS 表示清理成功
- *
- * 生命周期：inactive -> unconfigured 状态转换时调用
- *
- * 主要工作：
- * 1. 移除 configure 阶段注册的参数回调
- * 2. 确保硬件已断开连接（若未在 deactivate 断开则在此兜底）
- * 3. 清理命令缓冲区，准备重新配置
- */
-hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
-    const rclcpp_lifecycle::State& /*previous_state*/) {
-
-    RCLCPP_INFO(get_logger(), "Cleaning up ArxX5 Hardware Interface...");
-
-    // 释放 configure 阶段注册的参数回调（仅 reset handle，析构时由 rclcpp 解绑，避免跨版本 remove API 差异导致幽灵回调）
-    param_callback_handle_.reset();
-
-    control_active_ = false;
-    if (hardware_connected_) {
-        RCLCPP_WARN(get_logger(), "Hardware still connected during cleanup, disconnecting...");
-        hardware_connected_ = false;
-        controllers_[0].reset();
-        controllers_[1].reset();
-    }
-
-    // 清理命令缓冲区
-    left_cmd_buffer_.reset();
-    right_cmd_buffer_.reset();
-    single_cmd_buffer_.reset();
-
-    RCLCPP_INFO(get_logger(), "Cleanup complete.");
-    return hardware_interface::CallbackReturn::SUCCESS;
-}
-
-/**
- * @brief 硬件激活回调
+ * @brief 硬件激活回调（Inactive → Active）
  * @param previous_state 之前的生命周期状态（未使用）
  * @return SUCCESS 表示激活成功，ERROR 表示失败
  *
- * 生命周期：inactive -> active 状态转换时调用
+ * 生命周期：Inactive → Active 状态转换时调用。与 on_deactivate() 对称：activate 里分配的，
+ * deactivate 里释放。连接已在 on_configure 建立，此处使硬件进入可控状态并拿到有效状态。
  *
- * 主要工作（连接已在 on_configure 建立，此处仅使能并拿到有效状态）：
- * 1. 校验已连接（hardware_connected_ 与 controllers_）
- * 2. 执行 Enable/Homing：reset_to_home()
- * 3. 循环读取 get_joint_state() 直至有效（无 NaN/Inf）
- * 4. 将初始位置设为命令值（避免激活时跳变）
- * 5. 预分配命令缓冲区、应用增益
+ * 必须做的事：
+ * 1. 校验已连接 — hardware_connected_ 为 false 或 controllers_ 为空则直接返回 ERROR
+ * 2. 使能/进入可控状态 — 例如 reset_to_home() 或 enable()，根据硬件要求（有的系统只 enable 不强制回 home）
+ * 3. 读初始状态并校验 — 循环 get_joint_state()，校验无 NaN/Inf，有限次重试
+ * 4. 对齐命令值 — position_commands_[i] = position_states_[i]（或初始 state），防止激活瞬间跳变
+ * 5. 预分配命令 buffer — left/right_cmd_buffer_.emplace 或 single_cmd_buffer_.emplace，整个 Active 期间复用
+ * 6. 应用初始增益 — applyGains()
  *
- * 错误处理：若使能或读状态失败，清理控制器并返回 ERROR
+ * 最后置 control_active_ = true，此后 read/write 才会访问硬件。若使能/读状态失败，清理控制器并返回 ERROR。
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
+    // 1. 校验已连接（hardware_connected_ 与 controllers_）
     if (!hardware_connected_) {
         RCLCPP_ERROR(get_logger(), "Cannot activate: hardware not connected (configure first).");
         return hardware_interface::CallbackReturn::ERROR;
@@ -625,11 +582,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         }
     }
 
-    // 初始状态验证参数
     const int max_read_attempts = 10;
     const int read_interval_ms = 100;
-
-    // 辅助函数：检查关节状态是否包含 NaN/Inf
     auto has_invalid_values = [](const arx::JointState& state, size_t count) -> bool {
         for (size_t i = 0; i < count && i < static_cast<size_t>(state.pos.size()); ++i) {
             if (std::isnan(state.pos[i]) || std::isinf(state.pos[i])) {
@@ -644,14 +598,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             RCLCPP_INFO(get_logger(),
                         "Activating dual-arm: reset_to_home and waiting for valid state...");
 
-            // 重置到 HOME 位置（使能/归零，硬件要求）
+            // 2. 使能/进入可控状态（本机：reset_to_home；双臂左、右依次）
             RCLCPP_INFO(get_logger(), "Resetting left arm to home position...");
             controllers_[ARM_LEFT]->reset_to_home();
             RCLCPP_INFO(get_logger(), "Resetting right arm to home position...");
             controllers_[ARM_RIGHT]->reset_to_home();
             RCLCPP_INFO(get_logger(), "Both arms reset to home position.");
 
-            // 读取左臂初始状态（带验证和重试）
+            // 3. 读初始状态并校验（循环读取，无 NaN/Inf 则通过；左臂）
             bool left_success = false;
             arx::JointState left_state(left_joint_count_);
 
@@ -688,7 +642,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            // 读取右臂初始状态（带验证和重试）
+            // 3.（续）读右臂初始状态并校验
             bool right_success = false;
             arx::JointState right_state(right_joint_count_);
 
@@ -725,7 +679,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            // 更新左臂状态
+            // 4. 对齐命令值：写入初始状态并令 position_commands_ = 初始位置（防止激活瞬间跳变）；左臂
             for (size_t i = 0; i < left_joint_count_ && i < static_cast<size_t>(left_state.pos.size()); ++i) {
                 position_states_[i] = left_state.pos[i];
                 velocity_states_[i] = left_state.vel[i];
@@ -733,7 +687,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 position_commands_[i] = left_state.pos[i];
             }
 
-            // 更新右臂状态
+            // 4.（续）右臂
             for (size_t i = 0; i < right_joint_count_ && i < static_cast<size_t>(right_state.pos.size()); ++i) {
                 const size_t dst_idx = left_joint_count_ + i;
                 if (dst_idx < joint_count_) {
@@ -744,7 +698,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 }
             }
 
-            // 初始化夹爪状态（双臂模式：左臂和右臂各一个夹爪），转为 ROS 侧 [0, 0.044]
+            // 4.（续）夹爪状态（双臂：左、右各一个），转为 ROS 侧 [0, 0.044]
             if (has_gripper_) {
                 if (gripper_joint_names_.size() >= 1) {
                     gripper_position_states_[0] = left_state.gripper_pos * kGripperPosScaleToRos;
@@ -761,12 +715,12 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             const int arm_idx = arm_index_;
             RCLCPP_INFO(get_logger(), "Activating %s arm: reset_to_home and waiting for valid state...", arm_config_.c_str());
 
-            // 重置到 HOME 位置（使能/归零，硬件要求）
+            // 2. 使能/进入可控状态（本机：reset_to_home；单臂）
             RCLCPP_INFO(get_logger(), "Resetting %s arm to home position...", arm_config_.c_str());
             controllers_[arm_idx]->reset_to_home();
             RCLCPP_INFO(get_logger(), "Arm reset to home position.");
 
-            // 读取初始状态（带验证和重试）
+            // 3. 读初始状态并校验（单臂）
             bool initial_read_success = false;
             arx::JointState initial_state(joint_count_);
 
@@ -803,7 +757,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            // 更新关节状态
+            // 4. 对齐命令值：写入初始状态并令 position_commands_ = 初始位置（单臂 + 夹爪）
             for (size_t i = 0; i < joint_count_ && i < static_cast<size_t>(initial_state.pos.size()); ++i) {
                 position_states_[i] = initial_state.pos[i];
                 velocity_states_[i] = initial_state.vel[i];
@@ -811,14 +765,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
                 position_commands_[i] = initial_state.pos[i];
             }
 
-            // 初始化夹爪状态，转为 ROS 侧 [0, 0.044]
+            // 4.（续）夹爪状态，转为 ROS 侧 [0, 0.044]
             if (has_gripper_ && gripper_joint_names_.size() >= 1) {
                 gripper_position_states_[0] = initial_state.gripper_pos * kGripperPosScaleToRos;
                 gripper_position_commands_[0] = initial_state.gripper_pos * kGripperPosScaleToRos;
             }
         }
 
-        // 预分配命令缓冲区（避免在控制循环中频繁分配内存）
+        // 5. 预分配命令 buffer（整个 Active 期间复用）
         if (arm_index_ == ARM_DUAL) {
             left_cmd_buffer_.emplace(left_joint_count_);
             right_cmd_buffer_.emplace(right_joint_count_);
@@ -829,7 +783,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             RCLCPP_DEBUG(get_logger(), "Pre-allocated command buffer: %zu joints", joint_count_);
         }
 
-        // 应用初始增益值（双臂时使用左右臂独立增益）
+        // 6. 应用初始增益
         if (arm_index_ == ARM_DUAL) {
             applyGains(ARM_LEFT, left_joint_k_gains_, left_joint_d_gains_, left_gripper_kp_, left_gripper_kd_);
             applyGains(ARM_RIGHT, right_joint_k_gains_, right_joint_d_gains_, right_gripper_kp_, right_gripper_kd_);
@@ -837,6 +791,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             applyGains(arm_index_, joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
         }
 
+        // 激活完成：此后 read/write 才会访问硬件
         control_active_ = true;
         RCLCPP_INFO(get_logger(), "Successfully activated!");
         return hardware_interface::CallbackReturn::SUCCESS;
@@ -853,26 +808,31 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 }
 
 /**
- * @brief 硬件停用回调
+ * @brief 硬件停用回调（Active → Inactive）
  * @param previous_state 之前的生命周期状态（未使用）
  * @return SUCCESS 表示停用成功
  *
- * 生命周期：active -> inactive 状态转换时调用
+ * 生命周期：Active → Inactive 状态转换时调用。与 on_activate() 对称。
  *
- * 语义（方案 A - 停控不断连）：
- * - configure 建立连接，activate 使能；deactivate 仅停控，不断开连接。
- * - hardware_connected_ 与 controllers_ 保持不变，下次 activate 无需重新 configure。
+ * activate 做了什么（回顾）：
+ * - 校验已连接后，使能/进入可控状态（如 reset_to_home）
+ * - 读初始状态、对齐命令值，预分配命令 buffer（left/right_cmd_buffer_ 或 single_cmd_buffer_）
+ * - 应用初始增益，最后置 control_active_ = true，此后 read/write 才访问硬件
  *
- * 主要工作：
- * 1. 清理命令缓冲区（停止下发新命令）
- * 2. 不断连、不释放控制器，便于再次 activate 时快速使能
+ * deactivate 怎么做（本函数）：
+ * - 置 control_active_ = false → read()/write() 直接 return OK，不再访问硬件（noop）
+ * - 释放命令 buffer（left/right_cmd_buffer_.reset()、single_cmd_buffer_.reset()），与 activate 中 emplace 对称
+ * - 不断连、不释放控制器（hardware_connected_ 与 controllers_ 不变），连接与控制器在 on_cleanup 时释放；
+ *   下次 activate 无需重新 configure，可快速再次使能。
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
     RCLCPP_INFO(get_logger(), "Deactivating (keeping connection for next activate)...");
 
-    control_active_ = false;  // 之后 read/write 均 noop，不再访问硬件
+    // 1. 置 control_active_ = false，之后 read/write 均 noop
+    control_active_ = false;
+    // 2. 释放命令 buffer（与 on_activate 中 emplace 对称）
     left_cmd_buffer_.reset();
     right_cmd_buffer_.reset();
     single_cmd_buffer_.reset();
@@ -882,62 +842,85 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_deactivate(
 }
 
 /**
- * @brief 硬件错误处理回调
+ * @brief 硬件清理回调（Inactive → Unconfigured）
  * @param previous_state 之前的生命周期状态（未使用）
- * @return SUCCESS 表示错误处理完成
+ * @return SUCCESS 表示清理成功
  *
- * 生命周期：当硬件接口发生错误时由 ros2_control 调用
+ * 生命周期：Inactive → Unconfigured 状态转换时调用。与 on_configure() 对称。
  *
- * 主要工作：
- * 1. 记录错误日志
- * 2. 标记硬件已断开连接
- * 3. 安全释放控制器资源
+ * configure 做了什么（回顾）：
+ * - 读取并缓存参数，注册参数回调（add_on_set_parameters_callback）
+ * - 连接硬件（创建 SDK 控制器），置 hardware_connected_ = true
+ *
+ * cleanup 怎么做（本函数）：
+ * - 移除参数回调 — param_callback_handle_.reset()（本实现仅 reset handle，析构时由 rclcpp 解绑）
+ * - 兜底断开并释放 — 置 control_active_ = false；若 hardware_connected_ 仍为 true 打 WARN；
+ *   无条件 controllers_[0/1].reset()、hardware_connected_ = false，幂等、避免泄露
+ * - 兜底释放命令 buffer — left/right/single_cmd_buffer_.reset()，防止未走 deactivate 时遗漏
+ *
+ * 注意：节点参数（declare_parameter）不在 cleanup 中 undeclare，参数保留到节点销毁。
  */
-hardware_interface::CallbackReturn ArxX5Hardware::on_error(
+hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
-    RCLCPP_ERROR(get_logger(), "Error in ArxX5 Hardware Interface");
+    RCLCPP_INFO(get_logger(), "Cleaning up ArxX5 Hardware Interface...");
 
+    // 1. 移除 configure 阶段注册的参数回调（仅 reset handle）
+    param_callback_handle_.reset();
+
+    // 2. 兜底：置 control_active_ = false；若仍连接则打 WARN；无条件 reset 控制器并置 hardware_connected_ = false
     control_active_ = false;
-    hardware_connected_ = false;
-
-    // 安全释放控制器
+    if (hardware_connected_) {
+        RCLCPP_WARN(get_logger(), "Hardware still connected during cleanup, disconnecting...");
+    }
     controllers_[0].reset();
     controllers_[1].reset();
+    hardware_connected_ = false;
 
-    // 清理命令缓冲区
+    // 3. 兜底释放命令 buffer（防止未走 deactivate 时遗漏）
     left_cmd_buffer_.reset();
     right_cmd_buffer_.reset();
     single_cmd_buffer_.reset();
 
+    RCLCPP_INFO(get_logger(), "Cleanup complete.");
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 /**
- * @brief 硬件关闭回调
+ * @brief 硬件关闭回调（→ Finalized）
  * @param previous_state 之前的生命周期状态（未使用）
  * @return SUCCESS 表示关闭成功
  *
- * 生命周期：节点关闭时由 ros2_control 调用
+ * 生命周期：节点关闭时由 ros2_control 调用，对应文档中的 on_shutdown()。进程即将退出，
+ * 做最后的安全清场；不保证一定先经过 deactivate/cleanup。
  *
- * 主要工作：
- * 1. 记录关闭日志
- * 2. 确保硬件已断开连接
- * 3. 释放所有资源
+ * 规范语义（on_shutdown）：无条件兜底 + 幂等
+ * - 无条件兜底：确保硬件断开、资源释放，不追求“可重新 configure”
+ * - 幂等：允许被调用多次而无额外副作用
+ *
+ * 本实现行为：
+ * - 记录关闭日志
+ * - 置 control_active_ = false，确保后续即便还有 read/write 调度也不会访问硬件
+ * - 若仍处于连接状态则打 WARN 提示，然后无条件 reset 两个 controllers_ 并置 hardware_connected_ = false
+ * - 兜底释放命令 buffer（left/right/single_cmd_buffer_.reset()）
  */
 hardware_interface::CallbackReturn ArxX5Hardware::on_shutdown(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
+    // 记录关闭日志
     RCLCPP_INFO(get_logger(), "Shutting down ArxX5 Hardware Interface...");
 
+    // 置 control_active_ = false，后续 read/write 不再访问硬件
     control_active_ = false;
+    // 若仍连接则打 WARN；无条件 reset 控制器并置 hardware_connected_ = false（幂等兜底）
     if (hardware_connected_) {
-        hardware_connected_ = false;
-        controllers_[0].reset();
-        controllers_[1].reset();
+        RCLCPP_WARN(get_logger(), "Hardware still connected during shutdown, disconnecting...");
     }
+    controllers_[0].reset();
+    controllers_[1].reset();
+    hardware_connected_ = false;
 
-    // 清理命令缓冲区
+    // 兜底释放命令 buffer
     left_cmd_buffer_.reset();
     right_cmd_buffer_.reset();
     single_cmd_buffer_.reset();
@@ -945,6 +928,51 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_shutdown(
     RCLCPP_INFO(get_logger(), "Shutdown complete.");
     return hardware_interface::CallbackReturn::SUCCESS;
 }
+
+/**
+ * @brief 硬件错误处理回调（错误路径兜底）
+ * @param previous_state 之前的生命周期状态（未使用）
+ * @return SUCCESS 表示错误处理完成
+ *
+ * 生命周期：当任意生命周期回调（on_configure/on_activate/on_deactivate/on_cleanup/on_shutdown）
+ * 返回 ERROR 时由 ros2_control 调用，对应文档中的 on_error()。
+ *
+ * 规范语义（on_error）：清理资源 + 告诉框架“是否可恢复”
+ * - 触发来源：任一生命周期回调返回 ERROR
+ * - 返回值含义：SUCCESS → 转到 Unconfigured，可重新 configure；ERROR → 进入 Finalized，彻底终止
+ *
+ * 本实现行为：
+ * - 记录错误日志
+ * - 置 control_active_ = false、hardware_connected_ = false，表示当前不会再进行读写或控制
+ * - 安全释放 controllers_[0/1]，并清理命令 buffer（left/right/single_cmd_buffer_.reset()）
+ * - 始终返回 SUCCESS：表示错误已通过兜底清理处理完毕，框架可回到 Unconfigured 重新 configure
+ */
+hardware_interface::CallbackReturn ArxX5Hardware::on_error(
+    const rclcpp_lifecycle::State& /*previous_state*/) {
+
+    // 记录错误日志
+    RCLCPP_ERROR(get_logger(), "Error in ArxX5 Hardware Interface");
+
+    // 置 control_active_ = false、hardware_connected_ = false，不再读写/控制
+    control_active_ = false;
+    hardware_connected_ = false;
+
+    // 安全释放控制器
+    controllers_[0].reset();
+    controllers_[1].reset();
+
+    // 兜底释放命令 buffer
+    left_cmd_buffer_.reset();
+    right_cmd_buffer_.reset();
+    single_cmd_buffer_.reset();
+
+    // 返回 SUCCESS：错误已兜底清理，框架可回到 Unconfigured 重新 configure
+    return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+// =============================================================================
+// 控制循环接口（active 时由 controller_manager 周期性调用）
+// =============================================================================
 
 /**
  * @brief 从硬件读取状态
@@ -1168,6 +1196,10 @@ hardware_interface::return_type ArxX5Hardware::write(
         return hardware_interface::return_type::ERROR;
     }
 }
+
+// =============================================================================
+// 其他：参数回调与增益下发
+// =============================================================================
 
 /**
  * @brief 参数回调函数
