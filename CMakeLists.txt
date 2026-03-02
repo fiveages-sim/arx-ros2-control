@@ -6,6 +6,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
   # 注意：移除了部分-Werror选项，因为arx5-sdk头文件有相关警告
 endif()
 
+# Generate symbols for IDE indexer
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

@@ -16,11 +16,6 @@
 
 namespace arx_ros2_control {
 
-    // 臂配置常量
-    constexpr int ARM_LEFT = 0;
-    constexpr int ARM_RIGHT = 1;
-    constexpr int ARM_DUAL = 2;
-
 class ArxX5Hardware : public hardware_interface::SystemInterface {
 public:
     RCLCPP_SHARED_PTR_DEFINITIONS(ArxX5Hardware)
@@ -30,10 +25,10 @@ public:
         const hardware_interface::HardwareComponentInterfaceParams& params) override;
 
     // 导出状态接口 (position, velocity, effort)
-    std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
 
     // 导出命令接口 (position)
-    std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+    std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
 
     // 配置 (解析参数、验证配置，但不连接硬件)
     hardware_interface::CallbackReturn on_configure(
@@ -47,7 +42,7 @@ public:
     hardware_interface::CallbackReturn on_activate(
         const rclcpp_lifecycle::State& previous_state) override;
 
-    // 停用 (断开连接)
+    // 停用 (停控不断连，read/write 不再访问硬件)
     hardware_interface::CallbackReturn on_deactivate(
         const rclcpp_lifecycle::State& previous_state) override;
 
@@ -78,52 +73,32 @@ private:
     }
     std::optional<rclcpp::Logger> logger_;
 
-    // ARX5 SDK控制器（支持单臂和双臂）
-    std::shared_ptr<arx::Arx5JointController> controllers_[2];  // [0]=左臂, [1]=右臂
+    // ARX5 SDK 控制器（单臂）
+    std::shared_ptr<arx::Arx5JointController> controller_;
 
-    // 硬件连接状态标志
+    // 硬件连接状态标志（configure 建连为 true，cleanup/error/shutdown 才置 false）
     bool hardware_connected_ = false;
+
+    // 控制使能标志（activate 为 true，deactivate 为 false）；inactive 时 read/write 均 noop
+    bool control_active_ = false;
 
     // 参数回调句柄
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
     // 增益参数缓存（用于动态调整）
-    std::vector<double> joint_k_gains_;      // 关节位置增益（单臂或双臂共用默认）
-    std::vector<double> joint_d_gains_;      // 关节阻尼增益
-    double gripper_kp_ = 5.0;                // 夹爪位置增益
-    double gripper_kd_ = 0.2;                // 夹爪阻尼增益
-    // 双臂模式下的左右臂独立增益（仅 ARM_DUAL 时使用）
-    std::vector<double> left_joint_k_gains_;
-    std::vector<double> left_joint_d_gains_;
-    double left_gripper_kp_ = 5.0;
-    double left_gripper_kd_ = 0.2;
-    std::vector<double> right_joint_k_gains_;
-    std::vector<double> right_joint_d_gains_;
-    double right_gripper_kp_ = 5.0;
-    double right_gripper_kd_ = 0.2;
+    std::vector<double> joint_k_gains_;   // 关节位置增益
+    std::vector<double> joint_d_gains_;   // 关节阻尼增益
+    double gripper_kp_ = 5.0;             // 夹爪位置增益
+    double gripper_kd_ = 0.2;            // 夹爪阻尼增益
 
-    // 配置参数
-    std::string arm_config_;       // 臂配置: "LEFT", "RIGHT", "DUAL"
-    int arm_index_;                // 0=LEFT, 1=RIGHT, 2=DUAL
-    
-    // 单臂配置（向后兼容）
-    std::string robot_model_;      // 机器人型号 (X5, L5等)
-    std::string can_interface_;    // CAN接口名 (can0, can1等)
-    
-    // 双臂配置
-    std::string left_robot_model_;   // 左臂机器人型号
-    std::string right_robot_model_;  // 右臂机器人型号
-    std::string left_can_interface_; // 左臂CAN接口
-    std::string right_can_interface_; // 右臂CAN接口
-    
-    size_t joint_count_;              // 总关节数量
-    size_t left_joint_count_;         // 左臂关节数量
-    size_t right_joint_count_;        // 右臂关节数量
+    // 配置参数（仅单臂：机械臂类型 + CAN 口）
+    std::string robot_model_;    // 机器人型号 (X5, L5 等)
+    std::string can_interface_;  // CAN 接口名 (can0, can1 等)
+
+    size_t joint_count_;  // 关节数量
 
     // 关节名称
-    std::vector<std::string> joint_names_;           // 所有关节名称（按顺序：左臂+右臂）
-    std::vector<std::string> left_joint_names_;      // 左臂关节名称
-    std::vector<std::string> right_joint_names_;     // 右臂关节名称
+    std::vector<std::string> joint_names_;
 
     // 状态数据 (从SDK读取)
     std::vector<double> position_states_;
@@ -142,12 +117,7 @@ private:
     std::vector<double> gripper_position_commands_;  // 夹爪位置命令
 
     // 预分配的命令缓冲区（避免在控制循环中频繁分配内存）
-    std::optional<arx::JointState> left_cmd_buffer_;   // 左臂命令缓冲区
-    std::optional<arx::JointState> right_cmd_buffer_;  // 右臂命令缓冲区
-    std::optional<arx::JointState> single_cmd_buffer_; // 单臂命令缓冲区
-
-    // 辅助函数：字符串标准化（用于参数解析）
-    std::string normalizeString(const std::string& str);
+    std::optional<arx::JointState> cmd_buffer_;
 
     // 参数管理辅助函数
     template<typename T>
@@ -166,8 +136,8 @@ private:
     rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
 
     // 应用增益到硬件
-    void applyGains(int arm_index, const std::vector<double>& kp, const std::vector<double>& kd, 
-                     double gripper_kp, double gripper_kd);
+    void applyGains(const std::vector<double>& kp, const std::vector<double>& kd,
+                    double gripper_kp, double gripper_kd);
 };
 
 }  // namespace arx_ros2_control

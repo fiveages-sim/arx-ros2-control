@@ -10,21 +10,38 @@
 
 ## 双臂模式：启动时为左右臂设置不同 kp/kd
 
-若希望**一启动**就为左臂和右臂使用不同的 kp/kd，可在 ros2_control 的硬件参数里为左右臂分别指定初始增益，硬件接口会从这些参数读取初始值。
+在真实双臂模式下，会同时加载 `arx_lift2s_left_system` 和 `arx_lift2s_right_system` 两个 ros2_control system，每个 system 内部都是一个独立的 `ArxX5Hardware` 节点，各自拥有一套 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd` 参数。
 
-在机器人描述的 ros2_control 中，在对应 `<hardware>` 的 `<param>` 里增加（双臂时生效）：
+若希望**一启动**就为左臂和右臂使用不同的 kp/kd，只需要在机器人描述的 ros2_control 中，分别在左右两个 `<ros2_control>` 的 `<hardware>` 里配置不同的增益：
 
-- `left_joint_k_gains`、`left_joint_d_gains`：左臂关节 kp/kd（6 个值的数组字符串）
-- `right_joint_k_gains`、`right_joint_d_gains`：右臂关节 kp/kd（6 个值的数组字符串）
-- 可选：`left_gripper_kp`、`left_gripper_kd`、`right_gripper_kp`、`right_gripper_kd`：左右夹爪增益
-
-**示例（xacro）：**
+**示例（xacro，节选）：**
 
 ```xml
-<param name="left_joint_k_gains">[80.0, 70.0, 65.0, 22.0, 22.0, 14.0]</param>
-<param name="left_joint_d_gains">[2.6, 2.6, 2.3, 0.85, 0.85, 0.6]</param>
-<param name="right_joint_k_gains">[70.0, 60.0, 60.0, 20.0, 20.0, 12.0]</param>
-<param name="right_joint_d_gains">[2.2, 2.2, 2.0, 0.75, 0.75, 0.5]</param>
+<ros2_control name="arx_lift2s_left_system" type="system">
+  <hardware>
+    <plugin>arx_ros2_control/ArxX5Hardware</plugin>
+    <param name="robot_model">X5</param>
+    <param name="can_interface">can1</param>
+    <param name="joint_k_gains">[80.0, 70.0, 65.0, 22.0, 22.0, 14.0]</param>
+    <param name="joint_d_gains">[2.6, 2.6, 2.3, 0.85, 0.85, 0.6]</param>
+    <!-- 可选：夹爪增益 -->
+    <!-- <param name="gripper_kp">5.0</param> -->
+    <!-- <param name="gripper_kd">0.2</param> -->
+  </hardware>
+</ros2_control>
+
+<ros2_control name="arx_lift2s_right_system" type="system">
+  <hardware>
+    <plugin>arx_ros2_control/ArxX5Hardware</plugin>
+    <param name="robot_model">X5</param>
+    <param name="can_interface">can3</param>
+    <param name="joint_k_gains">[70.0, 60.0, 60.0, 20.0, 20.0, 12.0]</param>
+    <param name="joint_d_gains">[2.2, 2.2, 2.0, 0.75, 0.75, 0.5]</param>
+    <!-- 可选：夹爪增益 -->
+    <!-- <param name="gripper_kp">5.0</param> -->
+    <!-- <param name="gripper_kd">0.2</param> -->
+  </hardware>
+</ros2_control>
 ```
 
 不配置时，左右臂会使用同一套默认增益；配置后，启动时两臂即按上述参数使用不同 kp/kd。
@@ -50,7 +67,8 @@ done
 
 **常见的节点名称：**
 - `/arx5_system` - 单臂模式下的 ARX X5 硬件接口节点
-- `/arx_lift2s_unified_system` - **双臂模式**下的硬件接口节点
+- `/arx_lift2s_left_system`、`/arx_lift2s_right_system` - 真实双臂模式下左右臂的硬件接口节点（两个节点）
+- `/arx_lift2s_system` - 双臂仿真/非 real 模式下的统一硬件接口节点
 - `/controller_manager` - 控制器管理器节点（不包含硬件参数）
 
 ## 步骤 3：查看当前参数
@@ -79,35 +97,25 @@ ros2 param get /arx5_system gripper_kd
 String value is: [80.0, 70.0, 70.0, 30.0, 30.0, 20.0]
 ```
 
-### 双臂模式（DUAL）
+### 双臂模式（DUAL，两个硬件节点）
 
-双臂下硬件接口节点名为 **`/arx_lift2s_unified_system`**。左右臂各有独立增益，可分别查看，得到**两行**（左臂一行、右臂一行）：
+真实双臂模式下，会同时出现 `/arx_lift2s_left_system` 和 `/arx_lift2s_right_system` 两个硬件接口节点，左右臂各有独立增益，需要分别在两个节点上查看：
 
 ```bash
-# 双臂模式请使用节点 /arx_lift2s_unified_system
+# 左臂增益
+ros2 param get /arx_lift2s_left_system joint_k_gains
+ros2 param get /arx_lift2s_left_system joint_d_gains
+ros2 param get /arx_lift2s_left_system gripper_kp
+ros2 param get /arx_lift2s_left_system gripper_kd
 
-# 左臂增益（一行）
-ros2 param get /arx_lift2s_unified_system left_joint_k_gains
-ros2 param get /arx_lift2s_unified_system left_joint_d_gains
-ros2 param get /arx_lift2s_unified_system left_gripper_kp
-ros2 param get /arx_lift2s_unified_system left_gripper_kd
-
-# 右臂增益（另一行）
-ros2 param get /arx_lift2s_unified_system right_joint_k_gains
-ros2 param get /arx_lift2s_unified_system right_joint_d_gains
-ros2 param get /arx_lift2s_unified_system right_gripper_kp
-ros2 param get /arx_lift2s_unified_system right_gripper_kd
+# 右臂增益
+ros2 param get /arx_lift2s_right_system joint_k_gains
+ros2 param get /arx_lift2s_right_system joint_d_gains
+ros2 param get /arx_lift2s_right_system gripper_kp
+ros2 param get /arx_lift2s_right_system gripper_kd
 ```
 
-**示例输出（两行，分别对应左/右臂）：**
-```
-# 左臂
-String value is: [80.0, 70.0, 70.0, 30.0, 30.0, 20.0]
-# 右臂
-String value is: [80.0, 70.0, 70.0, 30.0, 30.0, 20.0]
-```
-
-双臂下仍保留统一参数 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd`：设置它们会**同时**更新左右臂为相同值；查看时仍只有一行，表示当前共用值（左右臂独立参数可分别查看）。
+如果使用仿真（`ros2_control_hardware_type` 不是 `real`），则通常只会有一个统一节点 `/arx_lift2s_system`，其参数用法与单臂类似。
 
 ## 步骤 4：动态调整参数
 
@@ -193,25 +201,23 @@ ros2 param set /arx5_system gripper_kd 0.5
 
 ### 4.5 双臂模式：分别调整左/右臂增益
 
-当 `arm_config` 为 `DUAL` 时，使用节点 **`/arx_lift2s_unified_system`**，可单独设置左臂或右臂的增益，互不影响：
+真实双臂模式下，左右臂是两个独立的硬件节点，需要分别对两个节点设置同名参数：
 
 ```bash
-# 双臂模式请使用节点 /arx_lift2s_unified_system
+# 仅设置左臂关节/夹爪增益
+ros2 param set /arx_lift2s_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx_lift2s_left_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
+ros2 param set /arx_lift2s_left_system gripper_kp 10.0
+ros2 param set /arx_lift2s_left_system gripper_kd 0.5
 
-# 仅设置左臂关节增益
-ros2 param set /arx_lift2s_unified_system left_joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
-ros2 param set /arx_lift2s_unified_system left_joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
-ros2 param set /arx_lift2s_unified_system left_gripper_kp 10.0
-ros2 param set /arx_lift2s_unified_system left_gripper_kd 0.5
-
-# 仅设置右臂关节增益
-ros2 param set /arx_lift2s_unified_system right_joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
-ros2 param set /arx_lift2s_unified_system right_joint_d_gains "[2.5, 2.0, 2.0, 1.2, 0.8, 0.6]"
-ros2 param set /arx_lift2s_unified_system right_gripper_kp 8.0
-ros2 param set /arx_lift2s_unified_system right_gripper_kd 0.4
+# 仅设置右臂关节/夹爪增益
+ros2 param set /arx_lift2s_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
+ros2 param set /arx_lift2s_right_system joint_d_gains "[2.5, 2.0, 2.0, 1.2, 0.8, 0.6]"
+ros2 param set /arx_lift2s_right_system gripper_kp 8.0
+ros2 param set /arx_lift2s_right_system gripper_kd 0.4
 ```
 
-若设置统一参数 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd`，则**左右臂会同步为相同值**（与单臂用法一致）。
+若希望左右臂使用相同的增益，只需在 `/arx_lift2s_left_system` 和 `/arx_lift2s_right_system` 上设置同一套参数值即可。
 
 **参数说明：**
 - 单个浮点数值
@@ -232,16 +238,9 @@ ros2 param set /arx5_system gripper_kd 0.2
 
 ## 步骤 5：验证参数是否生效
 
-### 5.1 查看日志输出
+### 5.1 查看日志输出（可选）
 
-参数设置成功后，节点会输出日志信息。单臂或设置统一参数时示例：
-
-```
-[INFO] [arx_x5_hardware]: joint_k_gains updated via parameter
-[INFO] [arx_x5_hardware]: Left arm gains applied: kp=[100.0, 90.0, ...], kd=[2.0, 2.0, ...], gripper_kp=5.00, gripper_kd=0.20
-```
-
-双臂下若设置 `left_joint_k_gains` 或 `right_joint_k_gains`，会分别看到 `Left arm gains applied` 或 `Right arm gains applied`。
+参数设置失败或发生异常时，节点会在日志中输出 WARN/ERROR 级别信息，例如参数长度不匹配、数值非法、读写硬件失败等。正常情况下可以主要通过后面的参数查询和机械臂行为来验证是否生效，只有在出现问题时再结合日志排查。
 
 ### 5.2 再次查看参数值
 
@@ -326,14 +325,9 @@ ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 
 **解决方法：** 确保提供6个值
 
-### 错误 2：硬件未连接
+### 注意 2：硬件未连接时的行为
 
-```bash
-# 如果硬件未激活，会收到错误：
-# Set parameter failed: Hardware not connected. Cannot set gains.
-```
-
-**解决方法：** 确保硬件已连接并激活
+当硬件尚未连接或未激活时，仍然可以通过 `ros2 param set` 成功设置增益参数，但此时增益不会立即下发到控制器，只有在硬件 configure + activate 之后才真正作用到电机。调整参数前，建议先完成硬件连接与激活。
 
 ### 错误 3：节点名称错误
 
@@ -342,13 +336,13 @@ ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 # Node not found: /wrong_node_name
 ```
 
-**解决方法：** 使用 `ros2 node list` 查找正确的节点名称（单臂多为 `/arx5_system`，双臂为 `/arx_lift2s_unified_system`）
+**解决方法：** 使用 `ros2 node list` 查找正确的节点名称（单臂多为 `/arx5_system`，双臂实机多为 `/arx_lift2s_left_system`、`/arx_lift2s_right_system`，双臂仿真多为 `/arx_lift2s_system`）
 
 ## 注意事项
 
 1. **参数立即生效**：参数修改后立即应用到硬件，无需重启节点
 2. **参数验证**：系统会自动验证参数类型和长度
-3. **硬件连接**：增益参数只能在硬件连接后设置
+3. **硬件连接**：建议在硬件连接并激活后调整增益；在未连接时参数仍可设置，但不会立即下发到硬件
 4. **参数持久化**：参数修改不会保存到配置文件，重启节点后会恢复默认值
 5. **安全建议**：调整参数时建议从小幅度开始，观察机械臂行为
 
@@ -370,9 +364,13 @@ ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 ## 相关命令速查
 
 ```bash
-# 单臂：节点多为 /arx5_system；双臂：节点为 /arx_lift2s_unified_system
-NODE=/arx5_system                    # 单臂
-# NODE=/arx_lift2s_unified_system   # 双臂时改用此节点
+# 单臂：节点多为 /arx5_system
+# 双臂实机：节点为 /arx_lift2s_left_system 和 /arx_lift2s_right_system
+# 双臂仿真：节点为 /arx_lift2s_system
+NODE=/arx5_system                       # 单臂示例
+# NODE=/arx_lift2s_left_system         # 左臂示例
+# NODE=/arx_lift2s_right_system        # 右臂示例
+# NODE=/arx_lift2s_system              # 双臂仿真示例
 
 # 查看所有参数
 ros2 param list $NODE
@@ -394,19 +392,18 @@ ros2 topic echo /rosout | grep arx_x5_hardware
 
 **节点名称：**
 - 单臂：`/arx5_system`
-- 双臂：`/arx_lift2s_unified_system`
+- 双臂实机：`/arx_lift2s_left_system`、`/arx_lift2s_right_system`
+- 双臂仿真：`/arx_lift2s_system`
 
-**单臂 / 统一参数（单臂必用，双臂可用来同步左右臂）：**
+**单臂 / 统一参数（单臂必用，双臂仿真可用来同时控制左右臂）：**
 - `joint_k_gains` - 关节位置增益（6个值的数组）
 - `joint_d_gains` - 关节阻尼增益（6个值的数组）
 - `gripper_kp` - 夹爪位置增益（单个值）
 - `gripper_kd` - 夹爪阻尼增益（单个值）
 
-**双臂独立参数（仅当 `arm_config=DUAL` 时可用，查看时可得两行）：**
-- `left_joint_k_gains` / `right_joint_k_gains` - 左/右臂关节位置增益
-- `left_joint_d_gains` / `right_joint_d_gains` - 左/右臂关节阻尼增益
-- `left_gripper_kp` / `right_gripper_kp` - 左/右夹爪位置增益
-- `left_gripper_kd` / `right_gripper_kd` - 左/右夹爪阻尼增益
+**双臂实机：左右臂节点与参数：**
+- `/arx_lift2s_left_system`  - 左臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
+- `/arx_lift2s_right_system` - 右臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
 
 **快速设置示例：**
 ```bash
@@ -417,9 +414,9 @@ ros2 param set /arx5_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
 ros2 param set /arx5_system gripper_kp 10.0
 ros2 param set /arx5_system gripper_kd 0.5
 
-# 双臂（节点 /arx_lift2s_unified_system，分别查看左右臂两行）
-ros2 param get /arx_lift2s_unified_system left_joint_k_gains
-ros2 param get /arx_lift2s_unified_system right_joint_k_gains
-ros2 param set /arx_lift2s_unified_system left_joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
-ros2 param set /arx_lift2s_unified_system right_joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
+# 双臂（左右各一个节点）
+ros2 param get /arx_lift2s_left_system joint_k_gains
+ros2 param get /arx_lift2s_right_system joint_k_gains
+ros2 param set /arx_lift2s_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx_lift2s_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
 ```
