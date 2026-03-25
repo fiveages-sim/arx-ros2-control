@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(arx5-sdk)
 
+option(ARX5_SDK_BUILD_EXAMPLES "Build standalone SDK example executables" OFF)
+
 set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_CXX_STANDARD 14)
@@ -14,6 +16,7 @@ find_package(kdl_parser REQUIRED)
 find_package(fmt REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Boost REQUIRED COMPONENTS container)
+include_directories(${kdl_parser_INCLUDE_DIRS})
 
 add_compile_definitions(SDK_ROOT="${CMAKE_BINARY_DIR}/..")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -43,7 +46,7 @@ target_link_libraries(ArxJointController
     Eigen3::Eigen
     Threads::Threads
     spdlog::spdlog
-    kdl_parser
+    kdl_parser::kdl_parser
     orocos-kdl
     soem
 )
@@ -58,41 +61,49 @@ target_link_libraries(ArxCartesianController
     Eigen3::Eigen
     Threads::Threads
     spdlog::spdlog
-    kdl_parser
+    kdl_parser::kdl_parser
     orocos-kdl
     soem
 )
 
-# Hack for py310 (conda environment is slightly different from other python versions)
-target_include_directories(ArxJointController PUBLIC $ENV{CONDA_PREFIX}/include/kdl_parser $ENV{CONDA_PREFIX}/include/urdfdom_headers)
-target_include_directories(ArxCartesianController PUBLIC $ENV{CONDA_PREFIX}/include/kdl_parser $ENV{CONDA_PREFIX}/include/urdfdom_headers)
-
-
-add_executable(test_joint_controller examples/test_joint_controller.cpp)
-target_link_libraries(test_joint_controller
-    ${LIB_DIR}/libhardware.so
-    ${LIB_DIR}/libsolver.so
-    ArxJointController
-    Eigen3::Eigen
-    Threads::Threads
-    spdlog::spdlog
-    kdl_parser
-    orocos-kdl
-    soem
+# Keep compatibility with both ROS system installs and older conda-based layouts.
+target_include_directories(ArxJointController PUBLIC
+    $ENV{CONDA_PREFIX}/include/kdl_parser
+    $ENV{CONDA_PREFIX}/include/urdfdom_headers
+)
+target_include_directories(ArxCartesianController PUBLIC
+    $ENV{CONDA_PREFIX}/include/kdl_parser
+    $ENV{CONDA_PREFIX}/include/urdfdom_headers
 )
 
-add_executable(test_cartesian_controller examples/test_cartesian_controller.cpp)
-target_link_libraries(test_cartesian_controller
-    ${LIB_DIR}/libhardware.so
-    ${LIB_DIR}/libsolver.so
-    ArxCartesianController
-    spdlog::spdlog
-    Eigen3::Eigen
-    Threads::Threads
-    kdl_parser
-    orocos-kdl
-    soem
-)
+
+if(ARX5_SDK_BUILD_EXAMPLES)
+    add_executable(test_joint_controller examples/test_joint_controller.cpp)
+    target_link_libraries(test_joint_controller
+        ${LIB_DIR}/libhardware.so
+        ${LIB_DIR}/libsolver.so
+        ArxJointController
+        Eigen3::Eigen
+        Threads::Threads
+        spdlog::spdlog
+        kdl_parser::kdl_parser
+        orocos-kdl
+        soem
+    )
+
+    add_executable(test_cartesian_controller examples/test_cartesian_controller.cpp)
+    target_link_libraries(test_cartesian_controller
+        ${LIB_DIR}/libhardware.so
+        ${LIB_DIR}/libsolver.so
+        ArxCartesianController
+        spdlog::spdlog
+        Eigen3::Eigen
+        Threads::Threads
+        kdl_parser::kdl_parser
+        orocos-kdl
+        soem
+    )
+endif()
 
 add_subdirectory(python)
 
