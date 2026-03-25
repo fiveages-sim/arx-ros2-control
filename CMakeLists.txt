@@ -74,6 +74,25 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 # ============== 导出插件 ==============
 pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control.xml)
 
+set(ARX5_COMPATIBLE_SOEM_LIB "")
+set(ARX5_SOEM_CANDIDATES
+  "$ENV{CONDA_PREFIX}/lib/libsoem.so"
+  "$ENV{HOME}/miniconda3/envs/arx-py312/lib/libsoem.so"
+  "$ENV{HOME}/mambaforge/envs/arx-py312/lib/libsoem.so"
+  "$ENV{HOME}/miniforge3/envs/arx-py312/lib/libsoem.so"
+)
+foreach(candidate IN LISTS ARX5_SOEM_CANDIDATES)
+  if(candidate AND EXISTS "${candidate}")
+    set(ARX5_COMPATIBLE_SOEM_LIB "${candidate}")
+    break()
+  endif()
+endforeach()
+if(ARX5_COMPATIBLE_SOEM_LIB)
+  message(STATUS "Using compatible SOEM runtime library: ${ARX5_COMPATIBLE_SOEM_LIB}")
+else()
+  message(WARNING "Compatible libsoem.so not found in known locations; real hardware runtime may fail with undefined symbol: EcatError")
+endif()
+
 # ============== 设置 RPATH ==============
 # 确保运行时能找到 SDK 库
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
@@ -101,6 +120,13 @@ install(
     ${ARX5_LIB_DIR}/libsolver.so
   DESTINATION lib
 )
+
+if(ARX5_COMPATIBLE_SOEM_LIB)
+  install(
+    FILES ${ARX5_COMPATIBLE_SOEM_LIB}
+    DESTINATION lib
+  )
+endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
