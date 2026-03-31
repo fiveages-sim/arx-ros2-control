@@ -1,6 +1,6 @@
 # Runs in this repository (arx-ros2-control) when pushed to GitHub.
-# CMake/package name is arx_x5_ros2_control (see package.xml).
-name: Build ARX X5 ROS2 Control Deb
+# ament/colcon package name is arx_ros2_control (see package.xml / CMake project).
+name: Build ARX ROS2 Control Deb
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
     env:
       PACKAGE_NAME: arms-arx-x5-ros2-control-jazzy
       DEB_FILE_PREFIX: arms_arx_x5_ros2_control_jazzy
-      ROS_PKG: arx_x5_ros2_control
+      ROS_PKG: arx_ros2_control
       DEFAULT_ROS_DISTRO: jazzy
 
     steps:
