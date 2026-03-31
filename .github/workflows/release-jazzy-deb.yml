@@ -84,6 +84,7 @@ jobs:
           sudo apt-get install -y \
             python3-rosdep python3-colcon-core python3-colcon-common-extensions \
             fakeroot dpkg-dev rsync build-essential cmake \
+            libfmt-dev libboost-container-dev liburdfdom-headers-dev \
             ros-${{ steps.meta.outputs.ros_distro }}-ament-cmake \
             ros-${{ steps.meta.outputs.ros_distro }}-ament-cmake-core \
             ros-${{ steps.meta.outputs.ros_distro }}-ament-package \
@@ -103,6 +104,49 @@ jobs:
           ros_python_path="/opt/ros/${ROS_DISTRO}/lib/python$(python3 -c 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))')/site-packages"
           export PYTHONPATH="${ros_python_path}:${PYTHONPATH:-}"
           rosdep install --from-paths "${GITHUB_WORKSPACE}" --ignore-src --rosdistro "${ROS_DISTRO}" --reinstall -r -y
+
+      # SOEM is linked as -lsoem; Ubuntu default repos do not ship it. Build v1.4.0 static lib with -fPIC so it
+      # can be linked into libArxJointController.so (shared).
+      - name: Build and install SOEM (EtherCAT)
+        shell: bash
+        run: |
+          set -eo pipefail
+          soem_src="${RUNNER_TEMP}/SOEM"
+          soem_prefix="${RUNNER_TEMP}/soem-install"
+          rm -rf "${soem_src}" "${soem_prefix}"
+          git clone --depth 1 --branch v1.4.0 https://github.com/OpenEtherCATsociety/SOEM.git "${soem_src}"
+          cmake \
+            -S "${soem_src}" \
+            -B "${soem_src}/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${soem_prefix}" \
+            -DCMAKE_C_FLAGS="-fPIC -w"
+          cmake --build "${soem_src}/build" -j"$(nproc)"
+          cmake --install "${soem_src}/build" --prefix "${soem_prefix}"
+          test -f "${soem_prefix}/lib/libsoem.a"
+
+      - name: Build external arx5-sdk (libArxJointController.so)
+        shell: bash
+        env:
+          ROS_DISTRO: ${{ steps.meta.outputs.ros_distro }}
+        run: |
+          set -eo pipefail
+          sdk_dir="${GITHUB_WORKSPACE}/external/arx5-sdk"
+          if [[ ! -f "${sdk_dir}/CMakeLists.txt" ]]; then
+            echo "external/arx5-sdk is missing; clone or submodule init required." >&2
+            exit 1
+          fi
+          source "/opt/ros/${ROS_DISTRO}/setup.bash"
+          export CONDA_PREFIX="/opt/ros/${ROS_DISTRO}"
+          export LIBRARY_PATH="${RUNNER_TEMP}/soem-install/lib:${LIBRARY_PATH:-}"
+          cmake \
+            -S "${sdk_dir}" \
+            -B "${sdk_dir}/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DARX5_SDK_BUILD_PYTHON=OFF \
+            -DARX5_SDK_BUILD_EXAMPLES=OFF
+          cmake --build "${sdk_dir}/build" -j"$(nproc)"
+          test -f "${sdk_dir}/build/libArxJointController.so"
 
       - name: Build install space
         shell: bash
