@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.16.3)
 project(arx5-sdk)
 
 option(ARX5_SDK_BUILD_EXAMPLES "Build standalone SDK example executables" OFF)
+option(ARX5_SDK_BUILD_PYTHON "Build pybind11 Python module (requires pybind11)" ON)
 
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -76,7 +77,6 @@ target_include_directories(ArxCartesianController PUBLIC
     $ENV{CONDA_PREFIX}/include/urdfdom_headers
 )
 
-
 if(ARX5_SDK_BUILD_EXAMPLES)
     add_executable(test_joint_controller examples/test_joint_controller.cpp)
     target_link_libraries(test_joint_controller
@@ -105,7 +105,9 @@ if(ARX5_SDK_BUILD_EXAMPLES)
     )
 endif()
 
-add_subdirectory(python)
+if(ARX5_SDK_BUILD_PYTHON)
+    add_subdirectory(python)
+endif()
 
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/
     DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${PROJECT_NAME}
