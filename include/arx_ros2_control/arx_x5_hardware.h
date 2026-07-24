@@ -27,7 +27,7 @@ public:
     // 导出状态接口 (position, velocity, effort)
     std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
 
-    // 导出命令接口 (position)
+    // 导出命令接口 (position[/velocity/effort/kp/kd]；模式只影响 write 用法)
     std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
 
     // 配置 (解析参数、验证配置，但不连接硬件)
@@ -67,8 +67,8 @@ public:
 private:
     // ROS2 节点和日志器
     std::shared_ptr<rclcpp::Node> node_;
-    rclcpp::Logger get_logger() const 
-    { 
+    rclcpp::Logger get_logger() const
+    {
         return logger_.value();
     }
     std::optional<rclcpp::Logger> logger_;
@@ -85,15 +85,23 @@ private:
     // 参数回调句柄
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
-    // 增益参数缓存（用于动态调整）
+    // 增益参数缓存（position 模式 / full_control fallback）
     std::vector<double> joint_k_gains_;   // 关节位置增益
     std::vector<double> joint_d_gains_;   // 关节阻尼增益
     double gripper_kp_ = 5.0;             // 夹爪位置增益
     double gripper_kd_ = 0.2;            // 夹爪阻尼增益
 
+    // 上次成功下发的增益（避免每周期 set_gain）
+    std::vector<double> last_applied_kp_;
+    std::vector<double> last_applied_kd_;
+    double last_applied_gripper_kp_ = -1.0;
+    double last_applied_gripper_kd_ = -1.0;
+
     // 配置参数（仅单臂：机械臂类型 + CAN 口）
     std::string robot_model_;    // 机器人型号 (X5, L5 等)
     std::string can_interface_;  // CAN 接口名 (can0, can1 等)
+    // full_control（默认，OCS2 MIX）| position（旧：仅 position + 参数增益）
+    std::string control_mode_{"full_control"};
 
     size_t joint_count_;  // 关节数量
 
@@ -105,8 +113,12 @@ private:
     std::vector<double> velocity_states_;
     std::vector<double> effort_states_;
 
-    // 命令数据 (发送到SDK)
+    // 命令数据 (发送到SDK)；始终分配，与 URDF export 对齐
     std::vector<double> position_commands_;
+    std::vector<double> velocity_commands_;
+    std::vector<double> effort_commands_;
+    std::vector<double> kp_commands_;
+    std::vector<double> kd_commands_;
 
     // 夹爪
     bool has_gripper_;
@@ -135,9 +147,11 @@ private:
     // 参数回调函数
     rcl_interfaces::msg::SetParametersResult paramCallback(const std::vector<rclcpp::Parameter> & params);
 
-    // 应用增益到硬件
+    // 应用增益到硬件（值未变则跳过）
     void applyGains(const std::vector<double>& kp, const std::vector<double>& kd,
-                    double gripper_kp, double gripper_kd);
+                    double gripper_kp, double gripper_kd, bool force = false);
+
+    bool isFullControl() const { return control_mode_ == "full_control"; }
 };
 
 }  // namespace arx_ros2_control

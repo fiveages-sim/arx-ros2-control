@@ -2,6 +2,8 @@
 
 本指南说明如何在运行时通过终端动态调整 ARX X5 机械臂的增益参数（kp/kd）。
 
+> **控制模式：** `control_mode:=full_control`（默认）时，关节 kp/kd 由 OCS2 等控制器经 command interface 下发；本指南的 `joint_k_gains` / `joint_d_gains` 主要作用于 **`position` 模式**，或作为 `full_control` 下非法命令增益的 fallback。夹爪 `gripper_kp` / `gripper_kd` 在两种模式下均可通过参数调整。
+
 ## 前提条件
 
 1. 已编译并安装 `arx_ros2_control` 包

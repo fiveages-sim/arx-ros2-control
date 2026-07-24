@@ -33,19 +33,18 @@ namespace arx_ros2_control {
         return result.empty() ? default_val : result;
     }
 
-    template<typename T>
-    static constexpr rclcpp::ParameterType paramTypeOf();
-
-    template<>
-    constexpr rclcpp::ParameterType paramTypeOf<std::string>() { return rclcpp::ParameterType::PARAMETER_STRING; }
-    template<>
-    constexpr rclcpp::ParameterType paramTypeOf<int>() { return rclcpp::ParameterType::PARAMETER_INTEGER; }
-    template<>
-    constexpr rclcpp::ParameterType paramTypeOf<double>() { return rclcpp::ParameterType::PARAMETER_DOUBLE; }
-    template<>
-    constexpr rclcpp::ParameterType paramTypeOf<bool>() { return rclcpp::ParameterType::PARAMETER_BOOL; }
-    template<>
-    constexpr rclcpp::ParameterType paramTypeOf<std::vector<double>>() { return rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY; }
+    static bool vectorsNearlyEqual(const std::vector<double>& a, const std::vector<double>& b, double eps = 1e-9)
+    {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::abs(a[i] - b[i]) > eps) {
+                return false;
+            }
+        }
+        return true;
+    }
 
 void ArxX5Hardware::declare_node_parameters()
 {
@@ -60,8 +59,8 @@ void ArxX5Hardware::declare_node_parameters()
     const auto ensure_string_param = [this](const std::string& name, const std::string& default_val, const std::string* hw_val) {
         if (node_->has_parameter(name)) {
             if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
-                try { 
-                    node_->undeclare_parameter(name); 
+                try {
+                    node_->undeclare_parameter(name);
                 } catch (...) {}
             } else {
                 return;
@@ -77,8 +76,8 @@ void ArxX5Hardware::declare_node_parameters()
     const auto ensure_double_param = [this](const std::string& name, double default_val, const std::string* hw_val) {
         if (node_->has_parameter(name)) {
             if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
-                try { 
-                    node_->undeclare_parameter(name); 
+                try {
+                    node_->undeclare_parameter(name);
                 } catch (...) {}
             } else {
                 return;
@@ -105,8 +104,8 @@ void ArxX5Hardware::declare_node_parameters()
 
         if (node_->has_parameter(name)) {
             if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
-                try { 
-                    node_->undeclare_parameter(name); 
+                try {
+                    node_->undeclare_parameter(name);
                 } catch (...) {}
             } else {
                 try {
@@ -115,8 +114,8 @@ void ArxX5Hardware::declare_node_parameters()
                         return;
                     }
                 } catch (...) {}
-                try { 
-                    node_->undeclare_parameter(name); 
+                try {
+                    node_->undeclare_parameter(name);
                 } catch (...) {}
             }
         }
@@ -132,6 +131,7 @@ void ArxX5Hardware::declare_node_parameters()
 
     ensure_string_param("robot_model", "X5", hw_find("robot_model"));
     ensure_string_param("can_interface", "can0", hw_find("can_interface"));
+    ensure_string_param("control_mode", "full_control", hw_find("control_mode"));
     ensure_double_array_sized("joint_k_gains", kDefaultJointKGains, 6);
     ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
     ensure_double_param("gripper_kp", kDefaultGripperKP, hw_find("gripper_kp"));
@@ -151,6 +151,13 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     declare_node_parameters();
     robot_model_ = get_node_param("robot_model", std::string("X5"));
     can_interface_ = get_node_param("can_interface", std::string("can0"));
+    control_mode_ = get_node_param("control_mode", std::string("full_control"));
+    if (control_mode_ != "full_control" && control_mode_ != "position") {
+        RCLCPP_WARN(get_logger(),
+            "Unknown control_mode '%s'; using 'full_control'. Supported: full_control | position",
+            control_mode_.c_str());
+        control_mode_ = "full_control";
+    }
 
     has_gripper_ = false;
     gripper_joint_names_.clear();
@@ -175,6 +182,10 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     velocity_states_.resize(joint_count_, 0.0);
     effort_states_.resize(joint_count_, 0.0);
     position_commands_.resize(joint_count_, 0.0);
+    velocity_commands_.resize(joint_count_, 0.0);
+    effort_commands_.resize(joint_count_, 0.0);
+    kp_commands_.resize(joint_count_, 0.0);
+    kd_commands_.resize(joint_count_, 0.0);
 
     if (has_gripper_) {
         const size_t gripper_count = gripper_joint_names_.size();
@@ -183,6 +194,11 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         gripper_effort_states_.resize(gripper_count, 0.0);
         gripper_position_commands_.resize(gripper_count, 0.0);
     }
+
+    RCLCPP_INFO(get_logger(),
+        "ArxX5Hardware init: model=%s can=%s control_mode=%s joints=%zu gripper=%s",
+        robot_model_.c_str(), can_interface_.c_str(), control_mode_.c_str(),
+        joint_count_, has_gripper_ ? "yes" : "no");
 
     controller_.reset();
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -215,11 +231,21 @@ std::vector<hardware_interface::StateInterface::ConstSharedPtr> ArxX5Hardware::o
 }
 
 std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_export_command_interfaces() {
+    // Always export the same set as interfaces.xacro (position/velocity/effort/kp/kd for arm).
+    // control_mode_ only changes how write() uses those buffers — not which are advertised.
     std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
     for (size_t i = 0; i < joint_count_; ++i) {
         command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
             joint_names_[i], hardware_interface::HW_IF_POSITION, &position_commands_[i]));
+        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+            joint_names_[i], hardware_interface::HW_IF_VELOCITY, &velocity_commands_[i]));
+        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+            joint_names_[i], hardware_interface::HW_IF_EFFORT, &effort_commands_[i]));
+        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+            joint_names_[i], "kp", &kp_commands_[i]));
+        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
+            joint_names_[i], "kd", &kd_commands_[i]));
     }
 
     if (has_gripper_) {
@@ -249,6 +275,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     joint_d_gains_ = current_kd;
     gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
+
+    // Seed command gains from parameter defaults (OCS2 may overwrite in full_control).
+    for (size_t i = 0; i < joint_count_; ++i) {
+        kp_commands_[i] = (i < joint_k_gains_.size()) ? joint_k_gains_[i] : kDefaultJointKGains[std::min(i, kDefaultJointKGains.size() - 1)];
+        kd_commands_[i] = (i < joint_d_gains_.size()) ? joint_d_gains_[i] : kDefaultJointDGains[std::min(i, kDefaultJointDGains.size() - 1)];
+        velocity_commands_[i] = 0.0;
+        effort_commands_[i] = 0.0;
+    }
 
     param_callback_handle_ = node_->add_on_set_parameters_callback(
         std::bind(&ArxX5Hardware::paramCallback, this, std::placeholders::_1));
@@ -327,6 +361,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
             velocity_states_[i] = initial_state.vel[i];
             effort_states_[i] = initial_state.torque[i];
             position_commands_[i] = initial_state.pos[i];
+            velocity_commands_[i] = 0.0;
+            effort_commands_[i] = 0.0;
         }
         if (has_gripper_ && gripper_joint_names_.size() >= 1) {
             gripper_position_states_[0] = initial_state.gripper_pos * kGripperPosScaleToRos;
@@ -334,9 +370,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         }
 
         cmd_buffer_.emplace(joint_count_);
-        applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+        last_applied_kp_.clear();
+        last_applied_kd_.clear();
+        last_applied_gripper_kp_ = -1.0;
+        last_applied_gripper_kd_ = -1.0;
+        applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_, true);
 
         control_active_ = true;
+        RCLCPP_INFO(get_logger(), "ArxX5Hardware activated (control_mode=%s)", control_mode_.c_str());
         return hardware_interface::CallbackReturn::SUCCESS;
 
     } catch (const std::exception& e) {
@@ -452,12 +493,66 @@ hardware_interface::return_type ArxX5Hardware::write(
 
     try {
         arx::JointState& cmd = *cmd_buffer_;
+
         for (size_t i = 0; i < joint_count_; ++i) {
-            cmd.pos[i] = position_commands_[i];
+            double pos = position_commands_[i];
+            if (!std::isfinite(pos)) {
+                pos = position_states_[i];
+                position_commands_[i] = pos;
+            }
+            cmd.pos[i] = pos;
+
+            if (isFullControl()) {
+                double vel = velocity_commands_[i];
+                if (!std::isfinite(vel)) {
+                    vel = 0.0;
+                    velocity_commands_[i] = 0.0;
+                }
+                double eff = effort_commands_[i];
+                if (!std::isfinite(eff)) {
+                    eff = 0.0;
+                    effort_commands_[i] = 0.0;
+                }
+                cmd.vel[i] = vel;
+                cmd.torque[i] = eff;
+            } else {
+                cmd.vel[i] = 0.0;
+                cmd.torque[i] = 0.0;
+            }
         }
+
         if (has_gripper_ && gripper_joint_names_.size() >= 1) {
-            cmd.gripper_pos = gripper_position_commands_[0] * 2.0;
+            double gpos = gripper_position_commands_[0];
+            if (!std::isfinite(gpos)) {
+                gpos = gripper_position_states_[0];
+                gripper_position_commands_[0] = gpos;
+            }
+            cmd.gripper_pos = gpos * 2.0;
         }
+
+        // Gains: full_control uses controller kp/kd (fallback to params); position uses params only.
+        std::vector<double> kp = joint_k_gains_;
+        std::vector<double> kd = joint_d_gains_;
+        if (isFullControl()) {
+            kp.resize(joint_count_);
+            kd.resize(joint_count_);
+            for (size_t i = 0; i < joint_count_; ++i) {
+                double kpi = kp_commands_[i];
+                double kdi = kd_commands_[i];
+                if (!std::isfinite(kpi) || kpi <= 0.0) {
+                    kpi = (i < joint_k_gains_.size()) ? joint_k_gains_[i] : kDefaultJointKGains[0];
+                }
+                if (!std::isfinite(kdi) || kdi < 0.0) {
+                    kdi = (i < joint_d_gains_.size()) ? joint_d_gains_[i] : kDefaultJointDGains[0];
+                }
+                kp[i] = kpi;
+                kd[i] = kdi;
+            }
+        }
+        applyGains(kp, kd, gripper_kp_, gripper_kd_);
+
+        // Near-current timestamp → init_fixed (no interpolator lag) for high-rate OCS2.
+        cmd.timestamp = controller_->get_timestamp();
         controller_->set_joint_cmd(cmd);
         return hardware_interface::return_type::OK;
 
@@ -486,7 +581,8 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
 
             joint_k_gains_ = new_kp;
-            if (hardware_connected_ && control_active_) {
+            // In full_control, OCS2 owns kp/kd each cycle; params only update fallback.
+            if (hardware_connected_ && control_active_ && !isFullControl()) {
                 applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
             }
         }
@@ -499,7 +595,7 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 return result;
             }
             joint_d_gains_ = new_kd;
-            if (hardware_connected_ && control_active_) {
+            if (hardware_connected_ && control_active_ && !isFullControl()) {
                 applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
             }
         }
@@ -512,7 +608,9 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             gripper_kp_ = new_gripper_kp;
             if (hardware_connected_ && control_active_) {
-                applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                applyGains(isFullControl() ? kp_commands_ : joint_k_gains_,
+                           isFullControl() ? kd_commands_ : joint_d_gains_,
+                           gripper_kp_, gripper_kd_);
             }
         }
         else if (param.get_name() == "gripper_kd") {
@@ -524,7 +622,9 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
             }
             gripper_kd_ = new_gripper_kd;
             if (hardware_connected_ && control_active_) {
-                applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_);
+                applyGains(isFullControl() ? kp_commands_ : joint_k_gains_,
+                           isFullControl() ? kd_commands_ : joint_d_gains_,
+                           gripper_kp_, gripper_kd_);
             }
         }
     }
@@ -533,7 +633,7 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
 }
 
 void ArxX5Hardware::applyGains(const std::vector<double>& kp, const std::vector<double>& kd,
-                               double gripper_kp, double gripper_kd)
+                               double gripper_kp, double gripper_kd, bool force)
 {
     if (!controller_) {
         RCLCPP_WARN(get_logger(), "Controller not initialized, cannot apply gains");
@@ -546,6 +646,15 @@ void ArxX5Hardware::applyGains(const std::vector<double>& kp, const std::vector<
             kp.size(), kd.size(), joint_count);
         return;
     }
+
+    if (!force &&
+        vectorsNearlyEqual(kp, last_applied_kp_) &&
+        vectorsNearlyEqual(kd, last_applied_kd_) &&
+        std::abs(gripper_kp - last_applied_gripper_kp_) < 1e-9 &&
+        std::abs(gripper_kd - last_applied_gripper_kd_) < 1e-9) {
+        return;
+    }
+
     try {
         arx::Gain gain(static_cast<int>(joint_count));
         for (size_t i = 0; i < joint_count; ++i) {
@@ -555,6 +664,10 @@ void ArxX5Hardware::applyGains(const std::vector<double>& kp, const std::vector<
         gain.gripper_kp = static_cast<float>(gripper_kp);
         gain.gripper_kd = static_cast<float>(gripper_kd);
         controller_->set_gain(gain);
+        last_applied_kp_ = kp;
+        last_applied_kd_ = kd;
+        last_applied_gripper_kp_ = gripper_kp;
+        last_applied_gripper_kd_ = gripper_kd;
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Failed to apply gains: %s", e.what());
     }
