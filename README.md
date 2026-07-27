@@ -4,22 +4,26 @@ Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) 封装的 `ros2_c
 
 用于 **单臂 `arx5` / 双臂 `arx_acone`** 真机（产品规则：Lift2S 走官方 `arxlift2s_ros2_control`，本包不负责升降）。
 
+控制契约对齐 [panthera-ht](https://github.com/fiveages-sim/open-deploy-ws/tree/panthera-ht) /
+[`ht-ros2-control`](https://github.com/fiveages-sim/ht-ros2-control)：URDF **始终**声明 MIX 接口，`control_mode` 只影响 `write()`。
+
 ## 插件
 
 | Plugin | 说明 |
 |--------|------|
 | `arx_ros2_control/ArxX5Hardware` | 单臂 SystemInterface；双臂时左右各实例化一次 |
 
-## 控制模式（`control_mode`）
+## 控制模式（`control_mode`）— 参考 panthera-ht
 
-与 panthera-ht 相同：URDF **始终**声明 `position/velocity/effort/kp/kd`，模式只影响 `write()`。
+| ARX 模式 | 默认 | 行为（`write()`） | 对应 HT |
+|----------|------|-------------------|---------|
+| `full_control` | 是（推荐真机） | pos + vel + effort + kp/kd → `set_gain` + `set_joint_cmd` | `full_control`（`pos_vel_tqe_kp_kd`） |
+| `position` | 否 | **保留真机位置环**：仅 position；kp/kd 用 HI `joint_k_gains` / `joint_d_gains`；vel/torque=0 | ≈ `pd_control` |
+| `pd_control` | 否 | `position` 的 HT 别名（`on_init` 归一化） | `pd_control` |
 
-| 模式 | 默认 | 行为 |
-|------|------|------|
-| `full_control` | 是 | OCS2 MIX：用控制器下发的 pos/vel/effort/kp/kd → `set_gain` + `set_joint_cmd`（等价 HT `pos_vel_tqe_kp_kd`） |
-| `position` | 否 | 旧行为：只用 position；kp/kd 来自参数 `joint_k_gains` / `joint_d_gains` |
+Stanford SDK 无 HT `position_velocity`（`pos_vel_MAXtqe`）等价路径，故不实现第三种模式。
 
-夹爪保持 **position-only**。
+夹爪保持 **position-only**（`gripper_kp` / `gripper_kd`）。
 
 硬件参数示例：
 
@@ -27,11 +31,51 @@ Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) 封装的 `ros2_c
 <param name="control_mode">full_control</param>
 <param name="robot_model">X5</param>
 <param name="can_interface">can1</param>
+<!-- 真机位置环调好的值：position 全程生效；full_control 仅 fallback -->
 <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
 <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
 ```
 
-`position` 模式下仍可用动态参数调增益，见 [DYNAMIC_PARAMS_USAGE.md](DYNAMIC_PARAMS_USAGE.md)。`full_control` 下关节 kp/kd 由控制器写入，参数仅作 fallback。
+两套增益（与 panthera-ht 相同分层，不要混为一谈）：
+
+| 层级 | 参数 | 何时生效 |
+|------|------|----------|
+| HI 参数 | `joint_k_gains` / `joint_d_gains` | **`position` 全程**；`full_control` 下 activate / 非法 cmd **fallback**（保留真机位置环值，勿改成均匀 `[30,3]`） |
+| 控制器 | `default_gains` / `pd_gains`（如 `[30, 3]`） | **`full_control` + OCS2 MIX**：每周期经 kp/kd command IF 下发 |
+
+`position` 动态调参见 [DYNAMIC_PARAMS_USAGE.md](DYNAMIC_PARAMS_USAGE.md)。
+
+## `full_control` 下发映射（OCS2 MIX）
+
+| 量 | 来源 | SDK |
+|----|------|-----|
+| position | OCS2 轨迹 | `JointState.pos` |
+| velocity | OCS2 `future_input` | `JointState.vel` |
+| effort（重力/静力学前馈） | OCS2 `calculateStaticTorques()` | `JointState.torque` |
+| kp / kd | OCS2 `pd_gains` / `default_gains` | `set_gain` |
+
+```bash
+# 编译（workspace）
+./quick_start.sh   # Build → 单/双臂真机包（Stanford）
+
+# 单臂 X5（推荐 full_control）
+ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real
+
+# 双臂 AC One（can1 / can3）
+ros2 launch ocs2_arm_controller demo.launch.py robot:=arx_acone hardware:=real
+
+# 保留真机位置环（经 robot_common_launch 的 xacro_ 前缀）
+ros2 launch ocs2_arm_controller demo.launch.py \
+  robot:=arx_acone hardware:=real xacro_control_mode:=position
+```
+
+| Launch / xacro | 说明 |
+|----------------|------|
+| `xacro_control_mode:=full_control` | 默认；OCS2 MIX（推荐真机） |
+| `xacro_control_mode:=position` | 真机位置环；HI `joint_k/d_gains` |
+| `xacro_control_mode:=pd_control` | 同上（HT 别名） |
+
+真机节点：单臂 `/arx5_system`；双臂 `/arx_acone_left_system`、`/arx_acone_right_system`。
 
 ## 依赖项
 

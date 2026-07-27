@@ -100,7 +100,8 @@ private:
     // 配置参数（仅单臂：机械臂类型 + CAN 口）
     std::string robot_model_;    // 机器人型号 (X5, L5 等)
     std::string can_interface_;  // CAN 接口名 (can0, can1 等)
-    // full_control（默认，OCS2 MIX）| position（旧：仅 position + 参数增益）
+    // full_control（默认，OCS2 MIX ≈ HT）| position（真机位置环 ≈ HT pd_control）
+    // pd_control 在 on_init 中归一化为 position
     std::string control_mode_{"full_control"};
 
     size_t joint_count_;  // 关节数量

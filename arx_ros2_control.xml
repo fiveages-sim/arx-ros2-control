@@ -3,7 +3,11 @@
          type="arx_ros2_control::ArxX5Hardware"
          base_class_type="hardware_interface::SystemInterface">
     <description>
-      ROS2 Control Hardware Interface for ARX X5 Robot Arm using arx5-sdk
+      ARX X5 / AC One hardware interface (Stanford arx5-sdk).
+      One SystemInterface per arm (dual AC One: left + right instances).
+      Always exports position/velocity/effort/kp/kd; control_mode selects write():
+      full_control (OCS2 MIX, default) | position (legacy real pos + HI gains) |
+      pd_control (HT-compatible alias of position). Same contract as panthera-ht.
     </description>
   </class>
 </library>

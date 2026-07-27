@@ -2,7 +2,7 @@
 
 本指南说明如何在运行时通过终端动态调整 ARX X5 机械臂的增益参数（kp/kd）。
 
-> **控制模式：** `control_mode:=full_control`（默认）时，关节 kp/kd 由 OCS2 等控制器经 command interface 下发；本指南的 `joint_k_gains` / `joint_d_gains` 主要作用于 **`position` 模式**，或作为 `full_control` 下非法命令增益的 fallback。夹爪 `gripper_kp` / `gripper_kd` 在两种模式下均可通过参数调整。
+> **控制模式（参考 panthera-ht）：** `full_control`（默认 / 推荐真机）时关节 kp/kd 由 OCS2 经 command IF 下发；`joint_k_gains` / `joint_d_gains` 主要作用于 **`position`（及 HT 别名 `pd_control`）**，或作 `full_control` 非法命令 fallback。夹爪 `gripper_kp` / `gripper_kd` 两种模式均可调。
 
 ## 前提条件
 
@@ -10,43 +10,39 @@
 2. 机械臂硬件已连接并启动
 3. ROS2 节点正在运行
 
-## 双臂模式：启动时为左右臂设置不同 kp/kd
+## 双臂模式（AC One）：启动时为左右臂设置不同 kp/kd
 
-在真实双臂模式下，会同时加载 `arx_lift2s_left_system` 和 `arx_lift2s_right_system` 两个 ros2_control system，每个 system 内部都是一个独立的 `ArxX5Hardware` 节点，各自拥有一套 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd` 参数。
+真实双臂 AC One 会同时加载 `arx_acone_left_system` 和 `arx_acone_right_system` 两个 ros2_control system，每个 system 是独立的 `ArxX5Hardware` 节点，各自拥有一套 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd`。
 
-若希望**一启动**就为左臂和右臂使用不同的 kp/kd，只需要在机器人描述的 ros2_control 中，分别在左右两个 `<ros2_control>` 的 `<hardware>` 里配置不同的增益：
+> **`full_control`（默认 / OCS2 MIX）：** 运行中关节 kp/kd 由控制器 `pd_gains`/`default_gains` 写入；下列参数主要用于 **activate 初值** 与非法命令 fallback，或 **`position` 模式**全程生效。
 
-**示例（xacro，节选）：**
+若希望**一启动**就为左臂和右臂使用不同的 fallback kp/kd，在描述包 ros2_control 里分别为左右 `<hardware>` 配置（**保留真机位置环调好的值**，不要强行改成 OCS2 的 `[30, 3]`）：
 
 ```xml
-<ros2_control name="arx_lift2s_left_system" type="system">
+<ros2_control name="arx_acone_left_system" type="system">
   <hardware>
     <plugin>arx_ros2_control/ArxX5Hardware</plugin>
     <param name="robot_model">X5</param>
     <param name="can_interface">can1</param>
-    <param name="joint_k_gains">[80.0, 70.0, 65.0, 22.0, 22.0, 14.0]</param>
-    <param name="joint_d_gains">[2.6, 2.6, 2.3, 0.85, 0.85, 0.6]</param>
-    <!-- 可选：夹爪增益 -->
-    <!-- <param name="gripper_kp">5.0</param> -->
-    <!-- <param name="gripper_kd">0.2</param> -->
+    <param name="control_mode">full_control</param>
+    <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
+    <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
   </hardware>
 </ros2_control>
 
-<ros2_control name="arx_lift2s_right_system" type="system">
+<ros2_control name="arx_acone_right_system" type="system">
   <hardware>
     <plugin>arx_ros2_control/ArxX5Hardware</plugin>
     <param name="robot_model">X5</param>
     <param name="can_interface">can3</param>
-    <param name="joint_k_gains">[70.0, 60.0, 60.0, 20.0, 20.0, 12.0]</param>
-    <param name="joint_d_gains">[2.2, 2.2, 2.0, 0.75, 0.75, 0.5]</param>
-    <!-- 可选：夹爪增益 -->
-    <!-- <param name="gripper_kp">5.0</param> -->
-    <!-- <param name="gripper_kd">0.2</param> -->
+    <param name="control_mode">full_control</param>
+    <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
+    <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
   </hardware>
 </ros2_control>
 ```
 
-不配置时，左右臂会使用同一套默认增益；配置后，启动时两臂即按上述参数使用不同 kp/kd。
+不配置时使用 HI 内置默认（与上表同为真机调过的 `[80…]` / `[2…]`）。MIX 运行中的 kp/kd 由控制器 `pd_gains`/`default_gains`（如 `[30, 3]`）覆盖。
 
 ## 步骤 2：查找节点名称
 
@@ -68,10 +64,10 @@ done
 ```
 
 **常见的节点名称：**
-- `/arx5_system` - 单臂模式下的 ARX X5 硬件接口节点
-- `/arx_lift2s_left_system`、`/arx_lift2s_right_system` - 真实双臂模式下左右臂的硬件接口节点（两个节点）
-- `/arx_lift2s_system` - 双臂仿真/非 real 模式下的统一硬件接口节点
-- `/controller_manager` - 控制器管理器节点（不包含硬件参数）
+- `/arx5_system` — 单臂 X5 真机
+- `/arx_acone_left_system`、`/arx_acone_right_system` — AC One 真机左右臂（两个节点）
+- `/arx_acone_system` — AC One 仿真 / 非 `real` 时的统一硬件节点
+- `/controller_manager` — 控制器管理器（不含硬件增益参数）
 
 ## 步骤 3：查看当前参数
 
@@ -99,25 +95,25 @@ ros2 param get /arx5_system gripper_kd
 String value is: [80.0, 70.0, 70.0, 30.0, 30.0, 20.0]
 ```
 
-### 双臂模式（DUAL，两个硬件节点）
+### 双臂模式（AC One，两个硬件节点）
 
-真实双臂模式下，会同时出现 `/arx_lift2s_left_system` 和 `/arx_lift2s_right_system` 两个硬件接口节点，左右臂各有独立增益，需要分别在两个节点上查看：
+真机同时出现 `/arx_acone_left_system` 与 `/arx_acone_right_system`，左右臂增益需分别查看：
 
 ```bash
 # 左臂增益
-ros2 param get /arx_lift2s_left_system joint_k_gains
-ros2 param get /arx_lift2s_left_system joint_d_gains
-ros2 param get /arx_lift2s_left_system gripper_kp
-ros2 param get /arx_lift2s_left_system gripper_kd
+ros2 param get /arx_acone_left_system joint_k_gains
+ros2 param get /arx_acone_left_system joint_d_gains
+ros2 param get /arx_acone_left_system gripper_kp
+ros2 param get /arx_acone_left_system gripper_kd
 
 # 右臂增益
-ros2 param get /arx_lift2s_right_system joint_k_gains
-ros2 param get /arx_lift2s_right_system joint_d_gains
-ros2 param get /arx_lift2s_right_system gripper_kp
-ros2 param get /arx_lift2s_right_system gripper_kd
+ros2 param get /arx_acone_right_system joint_k_gains
+ros2 param get /arx_acone_right_system joint_d_gains
+ros2 param get /arx_acone_right_system gripper_kp
+ros2 param get /arx_acone_right_system gripper_kd
 ```
 
-如果使用仿真（`ros2_control_hardware_type` 不是 `real`），则通常只会有一个统一节点 `/arx_lift2s_system`，其参数用法与单臂类似。
+仿真（非 `real`）通常只有统一节点 `/arx_acone_system`，用法与单臂类似。
 
 ## 步骤 4：动态调整参数
 
@@ -207,19 +203,19 @@ ros2 param set /arx5_system gripper_kd 0.5
 
 ```bash
 # 仅设置左臂关节/夹爪增益
-ros2 param set /arx_lift2s_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
-ros2 param set /arx_lift2s_left_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
-ros2 param set /arx_lift2s_left_system gripper_kp 10.0
-ros2 param set /arx_lift2s_left_system gripper_kd 0.5
+ros2 param set /arx_acone_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx_acone_left_system joint_d_gains "[3.0, 2.5, 2.5, 1.5, 1.0, 0.8]"
+ros2 param set /arx_acone_left_system gripper_kp 10.0
+ros2 param set /arx_acone_left_system gripper_kd 0.5
 
 # 仅设置右臂关节/夹爪增益
-ros2 param set /arx_lift2s_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
-ros2 param set /arx_lift2s_right_system joint_d_gains "[2.5, 2.0, 2.0, 1.2, 0.8, 0.6]"
-ros2 param set /arx_lift2s_right_system gripper_kp 8.0
-ros2 param set /arx_lift2s_right_system gripper_kd 0.4
+ros2 param set /arx_acone_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
+ros2 param set /arx_acone_right_system joint_d_gains "[2.5, 2.0, 2.0, 1.2, 0.8, 0.6]"
+ros2 param set /arx_acone_right_system gripper_kp 8.0
+ros2 param set /arx_acone_right_system gripper_kd 0.4
 ```
 
-若希望左右臂使用相同的增益，只需在 `/arx_lift2s_left_system` 和 `/arx_lift2s_right_system` 上设置同一套参数值即可。
+若希望左右臂使用相同的增益，只需在 `/arx_acone_left_system` 和 `/arx_acone_right_system` 上设置同一套参数值即可。
 
 **参数说明：**
 - 单个浮点数值
@@ -338,7 +334,7 @@ ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 # Node not found: /wrong_node_name
 ```
 
-**解决方法：** 使用 `ros2 node list` 查找正确的节点名称（单臂多为 `/arx5_system`，双臂实机多为 `/arx_lift2s_left_system`、`/arx_lift2s_right_system`，双臂仿真多为 `/arx_lift2s_system`）
+**解决方法：** 使用 `ros2 node list` 查找正确的节点名称（单臂多为 `/arx5_system`，双臂实机多为 `/arx_acone_left_system`、`/arx_acone_right_system`，双臂仿真多为 `/arx_acone_system`）
 
 ## 注意事项
 
@@ -367,12 +363,12 @@ ros2 param set /arx5_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0]"
 
 ```bash
 # 单臂：节点多为 /arx5_system
-# 双臂实机：节点为 /arx_lift2s_left_system 和 /arx_lift2s_right_system
-# 双臂仿真：节点为 /arx_lift2s_system
+# 双臂实机：节点为 /arx_acone_left_system 和 /arx_acone_right_system
+# 双臂仿真：节点为 /arx_acone_system
 NODE=/arx5_system                       # 单臂示例
-# NODE=/arx_lift2s_left_system         # 左臂示例
-# NODE=/arx_lift2s_right_system        # 右臂示例
-# NODE=/arx_lift2s_system              # 双臂仿真示例
+# NODE=/arx_acone_left_system         # 左臂示例
+# NODE=/arx_acone_right_system        # 右臂示例
+# NODE=/arx_acone_system              # 双臂仿真示例
 
 # 查看所有参数
 ros2 param list $NODE
@@ -394,8 +390,8 @@ ros2 topic echo /rosout | grep arx_x5_hardware
 
 **节点名称：**
 - 单臂：`/arx5_system`
-- 双臂实机：`/arx_lift2s_left_system`、`/arx_lift2s_right_system`
-- 双臂仿真：`/arx_lift2s_system`
+- 双臂实机：`/arx_acone_left_system`、`/arx_acone_right_system`
+- 双臂仿真：`/arx_acone_system`
 
 **单臂 / 统一参数（单臂必用，双臂仿真可用来同时控制左右臂）：**
 - `joint_k_gains` - 关节位置增益（6个值的数组）
@@ -404,8 +400,8 @@ ros2 topic echo /rosout | grep arx_x5_hardware
 - `gripper_kd` - 夹爪阻尼增益（单个值）
 
 **双臂实机：左右臂节点与参数：**
-- `/arx_lift2s_left_system`  - 左臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
-- `/arx_lift2s_right_system` - 右臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
+- `/arx_acone_left_system`  - 左臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
+- `/arx_acone_right_system` - 右臂：`joint_k_gains`、`joint_d_gains`、`gripper_kp`、`gripper_kd`
 
 **快速设置示例：**
 ```bash
@@ -417,8 +413,8 @@ ros2 param set /arx5_system gripper_kp 10.0
 ros2 param set /arx5_system gripper_kd 0.5
 
 # 双臂（左右各一个节点）
-ros2 param get /arx_lift2s_left_system joint_k_gains
-ros2 param get /arx_lift2s_right_system joint_k_gains
-ros2 param set /arx_lift2s_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
-ros2 param set /arx_lift2s_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
+ros2 param get /arx_acone_left_system joint_k_gains
+ros2 param get /arx_acone_right_system joint_k_gains
+ros2 param set /arx_acone_left_system joint_k_gains "[100.0, 90.0, 80.0, 40.0, 30.0, 25.0]"
+ros2 param set /arx_acone_right_system joint_k_gains "[90.0, 80.0, 70.0, 35.0, 25.0, 20.0]"
 ```

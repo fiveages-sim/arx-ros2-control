@@ -151,10 +151,18 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     declare_node_parameters();
     robot_model_ = get_node_param("robot_model", std::string("X5"));
     can_interface_ = get_node_param("can_interface", std::string("can0"));
+    // Modes mirror panthera-ht: URDF always exports MIX IFs; mode only changes write().
+    //   full_control — OCS2 MIX (pos/vel/effort/kp/kd)  ≈ HT full_control
+    //   position     — legacy real pos + joint_k/d_gains ≈ HT pd_control
+    //   pd_control   — HT-compatible alias → position
     control_mode_ = get_node_param("control_mode", std::string("full_control"));
+    if (control_mode_ == "pd_control") {
+        control_mode_ = "position";
+    }
     if (control_mode_ != "full_control" && control_mode_ != "position") {
         RCLCPP_WARN(get_logger(),
-            "Unknown control_mode '%s'; using 'full_control'. Supported: full_control | position",
+            "Unknown control_mode '%s'; using 'full_control'. "
+            "Supported: full_control | position | pd_control",
             control_mode_.c_str());
         control_mode_ = "full_control";
     }
@@ -530,7 +538,8 @@ hardware_interface::return_type ArxX5Hardware::write(
             cmd.gripper_pos = gpos * 2.0;
         }
 
-        // Gains: full_control uses controller kp/kd (fallback to params); position uses params only.
+        // Gains: full_control ← controller kp/kd (fallback HI params);
+        // position/pd_control ← HI joint_k/d_gains only (legacy real position loop).
         std::vector<double> kp = joint_k_gains_;
         std::vector<double> kd = joint_d_gains_;
         if (isFullControl()) {
