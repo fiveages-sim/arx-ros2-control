@@ -1,8 +1,8 @@
 # 动态参数调整使用指南
 
-本指南说明如何在运行时通过终端动态调整 ARX X5 机械臂的增益参数（kp/kd）。
+本指南说明如何在运行时通过终端 / rqt 动态调整 ARX X5 机械臂的增益参数（kp/kd）。
 
-> **控制模式（参考 panthera-ht）：** `full_control`（默认 / 推荐真机）时关节 kp/kd 由 OCS2 经 command IF 下发；`joint_k_gains` / `joint_d_gains` 主要作用于 **`position`（及 HT 别名 `pd_control`）**，或作 `full_control` 非法命令 fallback。夹爪 `gripper_kp` / `gripper_kd` 两种模式均可调。
+> **关节 kp/kd：** `full_control` 与 `position` 均使用硬件节点上的 `joint_k_gains` / `joint_d_gains`（可用 rqt 动态改）。控制器 yaml 里的 `pd_gains` / `default_gains` **不再驱动真机 MIT 增益**。夹爪用 `gripper_kp` / `gripper_kd`。
 
 ## 前提条件
 
@@ -14,9 +14,7 @@
 
 真实双臂 AC One 会同时加载 `arx_acone_left_system` 和 `arx_acone_right_system` 两个 ros2_control system，每个 system 是独立的 `ArxX5Hardware` 节点，各自拥有一套 `joint_k_gains` / `joint_d_gains` / `gripper_kp` / `gripper_kd`。
 
-> **`full_control`（默认 / OCS2 MIX）：** 运行中关节 kp/kd 由控制器 `pd_gains`/`default_gains` 写入；下列参数主要用于 **activate 初值** 与非法命令 fallback，或 **`position` 模式**全程生效。
-
-若希望**一启动**就为左臂和右臂使用不同的 fallback kp/kd，在描述包 ros2_control 里分别为左右 `<hardware>` 配置（**保留真机位置环调好的值**，不要强行改成 OCS2 的 `[30, 3]`）：
+若希望**一启动**就为左臂和右臂使用不同的关节 kp/kd，在描述包 ros2_control 里分别为左右 `<hardware>` 配置：
 
 ```xml
 <ros2_control name="arx_acone_left_system" type="system">
@@ -42,7 +40,7 @@
 </ros2_control>
 ```
 
-不配置时使用 HI 内置默认（与上表同为真机调过的 `[80…]` / `[2…]`）。MIX 运行中的 kp/kd 由控制器 `pd_gains`/`default_gains`（如 `[30, 3]`）覆盖。
+不配置时使用 HI 内置默认（与上表同为真机调过的 `[80…]` / `[2…]`）。运行中可用 rqt 分别改左右臂节点参数。
 
 ## 步骤 2：查找节点名称
 

@@ -17,7 +17,7 @@ Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) 封装的 `ros2_c
 
 | ARX 模式 | 默认 | 行为（`write()`） | 对应 HT |
 |----------|------|-------------------|---------|
-| `full_control` | 是（推荐真机） | pos + vel + effort + kp/kd → `set_gain` + `set_joint_cmd` | `full_control`（`pos_vel_tqe_kp_kd`） |
+| `full_control` | 是（推荐真机） | pos + vel + effort → `set_joint_cmd`；MIT kp/kd 用 HI `joint_k/d_gains` | `full_control`（`pos_vel_tqe_kp_kd`） |
 | `position` | 否 | **保留真机位置环**：仅 position；kp/kd 用 HI `joint_k_gains` / `joint_d_gains`；vel/torque=0 | ≈ `pd_control` |
 | `pd_control` | 否 | `position` 的 HT 别名（`on_init` 归一化） | `pd_control` |
 
@@ -31,19 +31,19 @@ Stanford SDK 无 HT `position_velocity`（`pos_vel_MAXtqe`）等价路径，故�
 <param name="control_mode">full_control</param>
 <param name="robot_model">X5</param>
 <param name="can_interface">can1</param>
-<!-- 真机位置环调好的值：position 全程生效；full_control 仅 fallback -->
+<!-- MIT kp/kd：full_control 与 position 均用此组；可用 rqt / ros2 param 动态改 -->
 <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
 <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
 ```
 
-两套增益（与 panthera-ht 相同分层，不要混为一谈）：
+增益来源：
 
 | 层级 | 参数 | 何时生效 |
 |------|------|----------|
-| HI 参数 | `joint_k_gains` / `joint_d_gains` | **`position` 全程**；`full_control` 下 activate / 非法 cmd **fallback**（保留真机位置环值，勿改成均匀 `[30,3]`） |
-| 控制器 | `default_gains` / `pd_gains`（如 `[30, 3]`） | **`full_control` + OCS2 MIX**：每周期经 kp/kd command IF 下发 |
+| HI 参数 | `joint_k_gains` / `joint_d_gains` | **`full_control` 与 `position` 全程**；rqt / `ros2 param` 可动态调整 |
+| 控制器 | `default_gains` / `pd_gains` | **不再驱动真机 MIT 增益**（HI 忽略 kp/kd command IF） |
 
-`position` 动态调参见 [DYNAMIC_PARAMS_USAGE.md](DYNAMIC_PARAMS_USAGE.md)。
+动态调参见 [DYNAMIC_PARAMS_USAGE.md](DYNAMIC_PARAMS_USAGE.md)。
 
 ## `full_control` 下发映射（OCS2 MIX）
 
@@ -52,7 +52,7 @@ Stanford SDK 无 HT `position_velocity`（`pos_vel_MAXtqe`）等价路径，故�
 | position | OCS2 轨迹 | `JointState.pos` |
 | velocity | OCS2 `future_input` | `JointState.vel` |
 | effort（重力/静力学前馈） | OCS2 `calculateStaticTorques()` | `JointState.torque` |
-| kp / kd | OCS2 `pd_gains` / `default_gains` | `set_gain` |
+| kp / kd | HI `joint_k_gains` / `joint_d_gains` | `set_gain` |
 
 ```bash
 # 编译（workspace）

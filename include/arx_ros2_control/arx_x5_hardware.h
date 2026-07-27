@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <optional>
@@ -85,9 +86,10 @@ private:
     // 参数回调句柄
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
-    // 增益参数缓存（position 模式 / full_control fallback）
+    // MIT kp/kd — full_control 与 position 均使用；rqt / ros2 param 动态可调
     std::vector<double> joint_k_gains_;   // 关节位置增益
     std::vector<double> joint_d_gains_;   // 关节阻尼增益
+    mutable std::mutex gains_mutex_;
     double gripper_kp_ = 5.0;             // 夹爪位置增益
     double gripper_kd_ = 0.2;            // 夹爪阻尼增益
 
