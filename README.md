@@ -25,11 +25,18 @@ URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `
 
 ```xml
 <param name="control_mode">full_control</param>
-<param name="robot_model">X5</param>
+<!-- robot_model 由 HI 写死为 X5，不导出 ROS 参数（rqt 不可见）；URDF 里可省略 -->
 <param name="can_interface">can1</param>  <!-- 单臂右臂用 can3 -->
 <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
 <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
+<!-- 可选：Ctrl+C / deactivate 时先插值到 shutdown_home 再阻尼（默认 false） -->
+<param name="shutdown_return_home">true</param>
+<param name="shutdown_home">[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]</param>
+<param name="shutdown_home_velocity">0.3</param>
+<param name="shutdown_home_timeout">2.0</param>
 ```
+
+Lift2S 真机 xacro 已打开上述关机回零；单臂 / ACone 默认仅 `set_to_damping`。故障路径（`on_error`）一律只阻尼、不插值。
 
 ## `full_control` 下发映射（OCS2 MIX）
 
@@ -41,8 +48,10 @@ URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `
 | kp / kd | HI `joint_k_gains` / `joint_d_gains` | `set_gain` |
 
 ```bash
-./quick_start.sh   # Build → 真机包；Launch → 单臂可选左/右
+./quick_start.sh   # Build → 真机包；Launch → 自动预启 Zenoh；单臂可选左/右
 
+# 手动 launch（RMW=zenoh 时先另开终端: ros2 run rmw_zenoh_cpp rmw_zenohd）
+source ~/lift2s-ws/install/setup.bash
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can1
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can3
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx_acone hardware:=real
@@ -64,4 +73,9 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 ### 第三方（`external/`）
 - `arx5-sdk`：头文件 + `lib/<arch>/libhardware.so`、`libsolver.so`
 - `arx_lift_src`：`lib/<arch>/libarx_lift_src.so`（Lift2S）
+- **SOEM 1.4.x**（运行时）：`libhardware.so` 依赖 `libsoem.so`。构建时从以下路径择一安装到 `install/.../lib`：
+  - `$CONDA_PREFIX/lib/libsoem.so`
+  - `~/miniconda3/envs/arx-py312/lib/libsoem.so`
+  - `external/SOEM/lib/<arch>/libsoem.so`
+  - 安装示例：`conda install -n arx-py312 conda-forge::soem=1.4.0`（勿用 2.x，会缺 `EcatError`）
 - Eigen3 / orocos_kdl / kdl_parser / spdlog

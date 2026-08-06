@@ -1,6 +1,8 @@
 #include "arx_ros2_control/arx_x5_hardware.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <unistd.h>
 #include <sstream>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
@@ -129,7 +131,7 @@ void ArxX5Hardware::declare_node_parameters()
         }
     };
 
-    ensure_string_param("robot_model", "X5", hw_find("robot_model"));
+    // robot_model is hardcoded to X5 (not a ROS param → hidden from rqt).
     ensure_string_param("can_interface", "can0", hw_find("can_interface"));
     // control_mode kept for URDF backward compat; only full_control is supported.
     ensure_string_param("control_mode", "full_control", hw_find("control_mode"));
@@ -137,6 +139,34 @@ void ArxX5Hardware::declare_node_parameters()
     ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
     ensure_double_param("gripper_kp", kDefaultGripperKP, hw_find("gripper_kp"));
     ensure_double_param("gripper_kd", kDefaultGripperKD, hw_find("gripper_kd"));
+
+    const auto ensure_bool_param = [this](const std::string& name, bool default_val,
+                                          const std::string* hw_val) {
+        if (node_->has_parameter(name)) {
+            if (node_->get_parameter(name).get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+                try {
+                    node_->undeclare_parameter(name);
+                } catch (...) {}
+            } else {
+                return;
+            }
+        }
+        if (!node_->has_parameter(name)) {
+            bool val = default_val;
+            if (hw_val) {
+                const std::string& s = *hw_val;
+                val = (s == "true" || s == "1" || s == "True" || s == "yes" || s == "on");
+            }
+            node_->declare_parameter<bool>(name, val);
+        }
+    };
+    // Deactivate: default damping only; set true to interpolate to shutdown_home first.
+    ensure_bool_param("shutdown_return_home", false, hw_find("shutdown_return_home"));
+    ensure_double_param("shutdown_home_velocity", 0.3, hw_find("shutdown_home_velocity"));
+    ensure_double_param("shutdown_home_timeout", 2.0, hw_find("shutdown_home_timeout"));
+    ensure_double_array_sized(
+        "shutdown_home",
+        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, 6);
 }
 
 hardware_interface::CallbackReturn ArxX5Hardware::on_init(
@@ -150,7 +180,16 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     node_ = get_node();
     logger_ = get_node()->get_logger();
     declare_node_parameters();
-    robot_model_ = get_node_param("robot_model", std::string("X5"));
+    // Fixed arm model for this HI (Lift2S / ARX5 / ACone all use X5 SDK profile).
+    robot_model_ = "X5";
+    {
+        auto it = info_.hardware_parameters.find("robot_model");
+        if (it != info_.hardware_parameters.end() && it->second != "X5") {
+            RCLCPP_WARN(get_logger(),
+                "Ignoring URDF robot_model='%s'; ArxX5Hardware is hardcoded to X5.",
+                it->second.c_str());
+        }
+    }
     can_interface_ = get_node_param("can_interface", std::string("can0"));
     // Arm is full_control (MIT MIX) only. Reject legacy position / pd_control.
     {
@@ -198,10 +237,37 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         gripper_position_commands_.resize(gripper_count, 0.0);
     }
 
+    shutdown_return_home_ = get_node_param("shutdown_return_home", false);
+    shutdown_home_velocity_ = get_node_param("shutdown_home_velocity", 0.3);
+    shutdown_home_timeout_sec_ = get_node_param("shutdown_home_timeout", 2.0);
+    if (!std::isfinite(shutdown_home_velocity_) || shutdown_home_velocity_ <= 0.0) {
+        shutdown_home_velocity_ = 0.3;
+    }
+    if (!std::isfinite(shutdown_home_timeout_sec_) || shutdown_home_timeout_sec_ <= 0.0) {
+        shutdown_home_timeout_sec_ = 2.0;
+    }
+    shutdown_home_ = get_node_param(
+        "shutdown_home",
+        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    if (shutdown_home_.size() != 6) {
+        const auto it = info_.hardware_parameters.find("shutdown_home");
+        if (it != info_.hardware_parameters.end()) {
+            shutdown_home_ = parseDoubleArrayLoose(
+                it->second, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        }
+    }
+    if (shutdown_home_.size() != 6) {
+        shutdown_home_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+    safe_exit_done_ = false;
+
     RCLCPP_INFO(get_logger(),
-        "ArxX5Hardware init: model=%s can=%s control_mode=full_control joints=%zu gripper=%s",
+        "ArxX5Hardware init: model=%s can=%s control_mode=full_control joints=%zu gripper=%s "
+        "shutdown_return_home=%s timeout=%.1fs vel=%.2f",
         robot_model_.c_str(), can_interface_.c_str(),
-        joint_count_, has_gripper_ ? "yes" : "no");
+        joint_count_, has_gripper_ ? "yes" : "no",
+        shutdown_return_home_ ? "true" : "false",
+        shutdown_home_timeout_sec_, shutdown_home_velocity_);
 
     controller_.reset();
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -379,6 +445,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_, true);
 
         control_active_ = true;
+        safe_exit_done_ = false;
         RCLCPP_INFO(get_logger(), "ArxX5Hardware activated (full_control / MIT MIX)");
         return hardware_interface::CallbackReturn::SUCCESS;
 
@@ -394,6 +461,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
 hardware_interface::CallbackReturn ArxX5Hardware::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
+    enterSafeExit(/*allow_return_home=*/true);
     control_active_ = false;
     cmd_buffer_.reset();
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -403,6 +471,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
     param_callback_handle_.reset();
+    enterSafeExit(/*allow_return_home=*/true);
     control_active_ = false;
     if (hardware_connected_) {
         RCLCPP_WARN(get_logger(), "Hardware still connected during cleanup, disconnecting...");
@@ -416,6 +485,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_cleanup(
 hardware_interface::CallbackReturn ArxX5Hardware::on_shutdown(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
+    enterSafeExit(/*allow_return_home=*/true);
     control_active_ = false;
     if (hardware_connected_) {
         RCLCPP_WARN(get_logger(), "Hardware still connected during shutdown, disconnecting...");
@@ -430,11 +500,136 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_error(
     const rclcpp_lifecycle::State& /*previous_state*/) {
 
     RCLCPP_ERROR(get_logger(), "Error in ArxX5 Hardware Interface");
+    // Fault path: damping only (no long return-home interpolate).
+    enterSafeExit(/*allow_return_home=*/false);
     control_active_ = false;
     hardware_connected_ = false;
     controller_.reset();
     cmd_buffer_.reset();
     return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+void ArxX5Hardware::enterSafeExit(bool allow_return_home)
+{
+    if (safe_exit_done_.exchange(true)) {
+        return;
+    }
+    if (!controller_ || !hardware_connected_) {
+        return;
+    }
+    try {
+        if (allow_return_home && shutdown_return_home_) {
+            moveToShutdownHomeThenDamping();
+        } else {
+            enterDampingOnly();
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(get_logger(), "enterSafeExit failed: %s; trying damping", e.what());
+        try {
+            enterDampingOnly();
+        } catch (...) {
+        }
+    }
+}
+
+void ArxX5Hardware::enterDampingOnly()
+{
+    if (!controller_) {
+        return;
+    }
+    RCLCPP_INFO(get_logger(), "entering damping (set_to_damping)");
+    controller_->set_to_damping();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+void ArxX5Hardware::moveToShutdownHomeThenDamping()
+{
+    if (!controller_ || joint_count_ == 0) {
+        enterDampingOnly();
+        return;
+    }
+
+    arx::JointState state = controller_->get_joint_state();
+    const size_t n = std::min(joint_count_, static_cast<size_t>(state.pos.size()));
+    const size_t home_n = std::min(n, shutdown_home_.size());
+
+    std::vector<double> start(home_n, 0.0);
+    double max_travel = 0.0;
+    for (size_t i = 0; i < home_n; ++i) {
+        start[i] = state.pos[i];
+        max_travel = std::max(max_travel, std::abs(shutdown_home_[i] - start[i]));
+    }
+
+    constexpr double kMinDurationSec = 1.0;
+    const double speed = std::max(0.05, std::abs(shutdown_home_velocity_));
+    const double duration_sec = std::clamp(
+        std::max(max_travel / speed, kMinDurationSec),
+        kMinDurationSec,
+        std::max(kMinDurationSec, shutdown_home_timeout_sec_));
+
+    RCLCPP_WARN(
+        get_logger(),
+        "Shutdown interpolate: max_travel=%.3f rad, duration=%.2fs, speed<=%.2f rad/s",
+        max_travel, duration_sec, speed);
+
+    if (max_travel <= 0.05) {
+        RCLCPP_INFO(get_logger(), "Already near shutdown home; entering damping");
+        enterDampingOnly();
+        return;
+    }
+
+    // Keep position stiffness during interpolate (do not damp first).
+    {
+        std::lock_guard<std::mutex> lock(gains_mutex_);
+        applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_, true);
+    }
+
+    auto smoothstep = [](double x) {
+        x = std::clamp(x, 0.0, 1.0);
+        return x * x * (3.0 - 2.0 * x);
+    };
+
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr auto kDt = std::chrono::milliseconds(20);
+    double prev_alpha = 0.0;
+
+    while (true) {
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const double alpha_lin = std::clamp(elapsed / duration_sec, 0.0, 1.0);
+        const double alpha = smoothstep(alpha_lin);
+        const double d_alpha = std::max(0.0, alpha - prev_alpha);
+        prev_alpha = alpha;
+
+        arx::JointState cmd(static_cast<int>(joint_count_));
+        const double step_dt = 0.02;
+        for (size_t i = 0; i < home_n; ++i) {
+            const double goal = shutdown_home_[i];
+            cmd.pos[i] = start[i] + alpha * (goal - start[i]);
+            cmd.vel[i] = std::clamp((d_alpha * (goal - start[i])) / step_dt, -speed, speed);
+            cmd.torque[i] = 0.0;
+        }
+        for (size_t i = home_n; i < n; ++i) {
+            cmd.pos[i] = state.pos[i];
+            cmd.vel[i] = 0.0;
+            cmd.torque[i] = 0.0;
+        }
+        if (has_gripper_) {
+            cmd.gripper_pos = state.gripper_pos;
+            cmd.gripper_vel = 0.0;
+            cmd.gripper_torque = 0.0;
+        }
+        cmd.timestamp = 0.0;
+        controller_->set_joint_cmd(cmd);
+
+        if (alpha_lin >= 1.0) {
+            break;
+        }
+        std::this_thread::sleep_for(kDt);
+    }
+
+    RCLCPP_INFO(get_logger(), "Shutdown home interpolation finished; entering damping");
+    enterDampingOnly();
 }
 
 hardware_interface::return_type ArxX5Hardware::read(
@@ -551,8 +746,11 @@ hardware_interface::return_type ArxX5Hardware::write(
         }
         applyGains(kp, kd, gripper_kp, gripper_kd, true);
 
-        // Near-current timestamp → init_fixed (no interpolator lag) for high-rate OCS2.
-        cmd.timestamp = controller_->get_timestamp();
+        // timestamp=0 → set_joint_cmd() stamps with its own get_timestamp()
+        // (preview=0 → init_fixed). Do NOT pre-stamp here: if CM write is delayed
+        // >1ms (e.g. OCS2 CppAd compile), a stale stamp hits override_waypoint and
+        // throws "End time must be no less than current time", which deactivates HI.
+        cmd.timestamp = 0.0;
         controller_->set_joint_cmd(cmd);
         return hardware_interface::return_type::OK;
 

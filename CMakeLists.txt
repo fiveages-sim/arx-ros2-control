@@ -92,8 +92,37 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 
 pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control.xml)
 
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+# Stanford libhardware.so needs SOEM 1.4.x at runtime (conda-forge::soem=1.4.0).
+# Prebuilt RPATH points at a foreign conda env; install a local copy into lib/.
+set(ARX5_COMPATIBLE_SOEM_LIB "")
+set(ARX5_SOEM_CANDIDATES
+  "$ENV{CONDA_PREFIX}/lib/libsoem.so"
+  "$ENV{HOME}/miniconda3/envs/arx-py312/lib/libsoem.so"
+  "$ENV{HOME}/mambaforge/envs/arx-py312/lib/libsoem.so"
+  "$ENV{HOME}/miniforge3/envs/arx-py312/lib/libsoem.so"
+  "${CMAKE_CURRENT_SOURCE_DIR}/external/SOEM/lib/${ARX_ARCH_DIR}/libsoem.so"
+)
+foreach(candidate IN LISTS ARX5_SOEM_CANDIDATES)
+  if(candidate AND EXISTS "${candidate}")
+    set(ARX5_COMPATIBLE_SOEM_LIB "${candidate}")
+    break()
+  endif()
+endforeach()
+if(ARX5_COMPATIBLE_SOEM_LIB)
+  message(STATUS "Using compatible SOEM runtime library: ${ARX5_COMPATIBLE_SOEM_LIB}")
+else()
+  message(WARNING
+    "Compatible libsoem.so not found. Real hardware will fail to load "
+    "(dlopen: libsoem.so). Install: conda install -n arx-py312 conda-forge::soem=1.4.0 "
+    "or place libsoem.so under external/SOEM/lib/${ARX_ARCH_DIR}/")
+endif()
+
+# Ensure plugin + SDK libs resolve next to each other at runtime
+set_target_properties(${PROJECT_NAME} PROPERTIES
+  BUILD_WITH_INSTALL_RPATH FALSE
+  INSTALL_RPATH "$ORIGIN"
+  INSTALL_RPATH_USE_LINK_PATH TRUE
+)
 
 install(
   DIRECTORY include/
@@ -120,6 +149,13 @@ if(TARGET ArxJointController)
   install(TARGETS ArxJointController LIBRARY DESTINATION lib)
 elseif(EXISTS "${ARX5_JOINT_CTRL}")
   install(FILES ${ARX5_JOINT_CTRL} DESTINATION lib)
+endif()
+
+if(ARX5_COMPATIBLE_SOEM_LIB)
+  install(
+    FILES ${ARX5_COMPATIBLE_SOEM_LIB}
+    DESTINATION lib
+  )
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
