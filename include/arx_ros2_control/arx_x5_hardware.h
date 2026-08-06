@@ -114,6 +114,8 @@ private:
     double shutdown_home_velocity_{0.3};
     double shutdown_home_timeout_sec_{2.0};
     std::atomic<bool> safe_exit_done_{false};
+    // Shared with ArxLiftHardware on /controller_manager (ros2 param set status_debug).
+    std::atomic<bool> status_debug_{false};
 
     template<typename T>
     T get_node_param(const std::string& name, const T& default_val)

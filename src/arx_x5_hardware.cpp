@@ -167,6 +167,8 @@ void ArxX5Hardware::declare_node_parameters()
     ensure_double_array_sized(
         "shutdown_home",
         std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, 6);
+    // Debug status logs (MIT gains, etc.); default off. Same param as ArxLiftHardware.
+    ensure_bool_param("status_debug", false, hw_find("status_debug"));
 }
 
 hardware_interface::CallbackReturn ArxX5Hardware::on_init(
@@ -180,6 +182,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     node_ = get_node();
     logger_ = get_node()->get_logger();
     declare_node_parameters();
+    status_debug_.store(get_node_param("status_debug", false));
     // Fixed arm model for this HI (Lift2S / ARX5 / ACone all use X5 SDK profile).
     robot_model_ = "X5";
     {
@@ -343,6 +346,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     joint_d_gains_ = current_kd;
     gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
+    status_debug_.store(get_node_param("status_debug", false));
 
     // Seed command gains from parameter defaults (OCS2 may overwrite).
     for (size_t i = 0; i < joint_count_; ++i) {
@@ -834,6 +838,17 @@ rcl_interfaces::msg::SetParametersResult ArxX5Hardware::paramCallback(
                 applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, new_gripper_kd, true);
             }
         }
+        else if (param.get_name() == "status_debug") {
+            if (param.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+                result.successful = false;
+                result.reason = "status_debug must be a bool";
+                return result;
+            }
+            status_debug_.store(param.as_bool());
+            RCLCPP_INFO(
+                get_logger(), "status_debug -> %s",
+                status_debug_.load() ? "true" : "false");
+        }
     }
 
     return result;
@@ -875,9 +890,11 @@ void ArxX5Hardware::applyGains(const std::vector<double>& kp, const std::vector<
         last_applied_kd_ = kd;
         last_applied_gripper_kp_ = gripper_kp;
         last_applied_gripper_kd_ = gripper_kd;
-        RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 2000,
-            "Applied MIT gains kp=[%.1f, ...] kd=[%.2f, ...] (gripper kp=%.1f kd=%.2f)",
-            kp[0], kd[0], gripper_kp, gripper_kd);
+        if (status_debug_.load()) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *node_->get_clock(), 2000,
+                "Applied MIT gains kp=[%.1f, ...] kd=[%.2f, ...] (gripper kp=%.1f kd=%.2f)",
+                kp[0], kd[0], gripper_kp, gripper_kd);
+        }
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Failed to apply gains: %s", e.what());
     }
