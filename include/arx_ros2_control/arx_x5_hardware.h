@@ -28,7 +28,7 @@ public:
     // 导出状态接口 (position, velocity, effort)
     std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
 
-    // 导出命令接口 (position[/velocity/effort/kp/kd]；模式只影响 write 用法)
+    // 导出命令接口 (MIX: position/velocity/effort/kp/kd)
     std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
 
     // 配置 (解析参数、验证配置，但不连接硬件)
@@ -86,7 +86,7 @@ private:
     // 参数回调句柄
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
-    // MIT kp/kd — full_control 与 position 均使用；rqt / ros2 param 动态可调
+    // MIT kp/kd（full_control）；rqt / ros2 param 动态可调
     std::vector<double> joint_k_gains_;   // 关节位置增益
     std::vector<double> joint_d_gains_;   // 关节阻尼增益
     mutable std::mutex gains_mutex_;
@@ -102,9 +102,6 @@ private:
     // 配置参数（仅单臂：机械臂类型 + CAN 口）
     std::string robot_model_;    // 机器人型号 (X5, L5 等)
     std::string can_interface_;  // CAN 接口名 (can0, can1 等)
-    // full_control（默认，OCS2 MIX ≈ HT）| position（真机位置环 ≈ HT pd_control）
-    // pd_control 在 on_init 中归一化为 position
-    std::string control_mode_{"full_control"};
 
     size_t joint_count_;  // 关节数量
 
@@ -153,8 +150,6 @@ private:
     // 应用增益到硬件（值未变则跳过）
     void applyGains(const std::vector<double>& kp, const std::vector<double>& kd,
                     double gripper_kp, double gripper_kd, bool force = false);
-
-    bool isFullControl() const { return control_mode_ == "full_control"; }
 };
 
 }  // namespace arx_ros2_control

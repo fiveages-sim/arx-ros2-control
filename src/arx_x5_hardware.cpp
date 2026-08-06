@@ -131,6 +131,7 @@ void ArxX5Hardware::declare_node_parameters()
 
     ensure_string_param("robot_model", "X5", hw_find("robot_model"));
     ensure_string_param("can_interface", "can0", hw_find("can_interface"));
+    // control_mode kept for URDF backward compat; only full_control is supported.
     ensure_string_param("control_mode", "full_control", hw_find("control_mode"));
     ensure_double_array_sized("joint_k_gains", kDefaultJointKGains, 6);
     ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
@@ -151,20 +152,14 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     declare_node_parameters();
     robot_model_ = get_node_param("robot_model", std::string("X5"));
     can_interface_ = get_node_param("can_interface", std::string("can0"));
-    // Modes: URDF always exports MIX IFs; mode only changes write().
-    //   full_control — OCS2 MIX pos/vel/effort; MIT kp/kd from HI joint_k/d_gains
-    //   position     — legacy real pos + joint_k/d_gains ≈ HT pd_control
-    //   pd_control   — HT-compatible alias → position
-    control_mode_ = get_node_param("control_mode", std::string("full_control"));
-    if (control_mode_ == "pd_control") {
-        control_mode_ = "position";
-    }
-    if (control_mode_ != "full_control" && control_mode_ != "position") {
-        RCLCPP_WARN(get_logger(),
-            "Unknown control_mode '%s'; using 'full_control'. "
-            "Supported: full_control | position | pd_control",
-            control_mode_.c_str());
-        control_mode_ = "full_control";
+    // Arm is full_control (MIT MIX) only. Reject legacy position / pd_control.
+    {
+        const std::string mode = get_node_param("control_mode", std::string("full_control"));
+        if (mode != "full_control") {
+            RCLCPP_WARN(get_logger(),
+                "Ignoring unsupported control_mode '%s'; ArxX5Hardware only supports full_control (MIT MIX).",
+                mode.c_str());
+        }
     }
 
     has_gripper_ = false;
@@ -204,8 +199,8 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     }
 
     RCLCPP_INFO(get_logger(),
-        "ArxX5Hardware init: model=%s can=%s control_mode=%s joints=%zu gripper=%s",
-        robot_model_.c_str(), can_interface_.c_str(), control_mode_.c_str(),
+        "ArxX5Hardware init: model=%s can=%s control_mode=full_control joints=%zu gripper=%s",
+        robot_model_.c_str(), can_interface_.c_str(),
         joint_count_, has_gripper_ ? "yes" : "no");
 
     controller_.reset();
@@ -239,8 +234,7 @@ std::vector<hardware_interface::StateInterface::ConstSharedPtr> ArxX5Hardware::o
 }
 
 std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_export_command_interfaces() {
-    // Always export the same set as interfaces.xacro (position/velocity/effort/kp/kd for arm).
-    // control_mode_ only changes how write() uses those buffers — not which are advertised.
+    // Export MIX interfaces (position/velocity/effort/kp/kd) to match interfaces.xacro.
     std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
     for (size_t i = 0; i < joint_count_; ++i) {
@@ -284,7 +278,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     gripper_kp_ = get_node_param("gripper_kp", kDefaultGripperKP);
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
 
-    // Seed command gains from parameter defaults (OCS2 may overwrite in full_control).
+    // Seed command gains from parameter defaults (OCS2 may overwrite).
     for (size_t i = 0; i < joint_count_; ++i) {
         kp_commands_[i] = (i < joint_k_gains_.size()) ? joint_k_gains_[i] : kDefaultJointKGains[std::min(i, kDefaultJointKGains.size() - 1)];
         kd_commands_[i] = (i < joint_d_gains_.size()) ? joint_d_gains_[i] : kDefaultJointDGains[std::min(i, kDefaultJointDGains.size() - 1)];
@@ -385,7 +379,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_activate(
         applyGains(joint_k_gains_, joint_d_gains_, gripper_kp_, gripper_kd_, true);
 
         control_active_ = true;
-        RCLCPP_INFO(get_logger(), "ArxX5Hardware activated (control_mode=%s)", control_mode_.c_str());
+        RCLCPP_INFO(get_logger(), "ArxX5Hardware activated (full_control / MIT MIX)");
         return hardware_interface::CallbackReturn::SUCCESS;
 
     } catch (const std::exception& e) {
@@ -502,31 +496,26 @@ hardware_interface::return_type ArxX5Hardware::write(
     try {
         arx::JointState& cmd = *cmd_buffer_;
 
+        // full_control only: always send pos + vel + effort (MIT MIX).
         for (size_t i = 0; i < joint_count_; ++i) {
             double pos = position_commands_[i];
             if (!std::isfinite(pos)) {
                 pos = position_states_[i];
                 position_commands_[i] = pos;
             }
-            cmd.pos[i] = pos;
-
-            if (isFullControl()) {
-                double vel = velocity_commands_[i];
-                if (!std::isfinite(vel)) {
-                    vel = 0.0;
-                    velocity_commands_[i] = 0.0;
-                }
-                double eff = effort_commands_[i];
-                if (!std::isfinite(eff)) {
-                    eff = 0.0;
-                    effort_commands_[i] = 0.0;
-                }
-                cmd.vel[i] = vel;
-                cmd.torque[i] = eff;
-            } else {
-                cmd.vel[i] = 0.0;
-                cmd.torque[i] = 0.0;
+            double vel = velocity_commands_[i];
+            if (!std::isfinite(vel)) {
+                vel = 0.0;
+                velocity_commands_[i] = 0.0;
             }
+            double eff = effort_commands_[i];
+            if (!std::isfinite(eff)) {
+                eff = 0.0;
+                effort_commands_[i] = 0.0;
+            }
+            cmd.pos[i] = pos;
+            cmd.vel[i] = vel;
+            cmd.torque[i] = eff;
         }
 
         if (has_gripper_ && gripper_joint_names_.size() >= 1) {
