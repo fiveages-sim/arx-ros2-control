@@ -3,7 +3,7 @@
 <package format="3">
   <name>arx_ros2_control</name>
   <version>0.1.0</version>
-  <description>ROS2 Control hardware interfaces for ARX X5 arms and Lift2S column</description>
+  <description>ROS2 Control Hardware Interface for ARX X5 Robot Arm</description>
   <maintainer email="todo@todo.com">FiveAges</maintainer>
   <license>Apache-2.0</license>
 
@@ -13,7 +13,6 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
-  <depend>std_msgs</depend>
   <depend>eigen</depend>
   <depend>orocos_kdl_vendor</depend>
   <depend>kdl_parser</depend>

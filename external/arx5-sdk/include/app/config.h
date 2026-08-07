@@ -299,7 +299,7 @@ class ControllerConfigFactory
             0.2,                                                                // default_gripper_kd
             20,                                                                 // over_current_cnt_max
             0.002,                                                              // controller_dt
-            false,                                                               // gravity_compensation
+            true,                                                               // gravity_compensation
             true,                                                               // background_send_recv
             true,                                                               // shutdown_to_passive
             "linear",                                                           // interpolation_method
@@ -313,7 +313,7 @@ class ControllerConfigFactory
             0.2,                                                          // default_gripper_kd
             20,                                                           // over_current_cnt_max
             0.002,                                                        // controller_dt
-            false,                                                         // gravity_compensation
+            true,                                                         // gravity_compensation
             true,                                                         // background_send_recv
             true,                                                         // shutdown_to_passive
             "linear",                                                     // interpolation_method
