@@ -1,81 +1,79 @@
-# ARX X5 ROS2 Control 硬件接口包
+# ARX ROS2 Control 硬件接口包
 
-本包提供了 ARX X5 机械臂的 ROS2 Control 硬件接口实现。
+Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) + Lift 库封装的 `ros2_control` SystemInterface。
 
-## 依赖项
+本包作为 **Lift2S 部署工作空间** 的真机 HI 子模块（`src/arx-ros2-control`），同时覆盖：
 
-### ROS2 依赖
-- `hardware_interface`
-- `pluginlib`
-- `rclcpp`
-- `rclcpp_lifecycle`
+- 单臂 `arx5` / 双臂 `arx_acone`（`ArxX5Hardware`）
+- Lift2S 升降柱（`ArxLiftHardware`，can5）
 
-### 第三方依赖
-- `Eigen3`
-- `orocos_kdl`
-- `kdl_parser`
-- `spdlog`
+## 插件
 
-## 编译步骤
+| Plugin | 说明 |
+|--------|------|
+| `arx_ros2_control/ArxX5Hardware` | 单臂 SystemInterface；双臂时左右各实例化一次 |
+| `arx_ros2_control/ArxLiftHardware` | Lift2S 升降（默认 hybrid） |
 
-### 1. 编译 external 文件夹下的 SDK
+## 臂控制（仅 `full_control` / MIT MIX）
 
-在编译主包之前，需要先编译 `external/arx5-sdk` 目录下的 SDK。
+URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `kp/kd` 来自 HI `joint_k_gains` / `joint_d_gains`。
 
-#### 1.1 设置 conda 环境
+仅支持 `full_control`。若 URDF 写了其它 `control_mode`，HI 会告警并忽略，按 full_control 运行。
 
-SDK 需要 conda 环境来管理依赖。推荐使用 mamba（更快），也可以使用 conda：
+夹爪保持 **position-only**（`gripper_kp` / `gripper_kd`）。
 
-```bash
-# 进入 SDK 目录
-cd external/arx5-sdk
-
-# 使用 mamba 创建环境（推荐，约1分钟）
-mamba env create -f conda_environments/py312_environment.yaml
-
-# 或使用 conda（较慢，约10分钟）
-# conda env create -f conda_environments/py312_environment.yaml
-
-# 激活环境
-conda activate arx-py312
+```xml
+<param name="control_mode">full_control</param>
+<!-- robot_model 由 HI 写死为 X5，不导出 ROS 参数（rqt 不可见）；URDF 里可省略 -->
+<param name="can_interface">can1</param>  <!-- 单臂右臂用 can3 -->
+<!-- 单臂 / ACone 默认；Lift2S 现场默认为 [20,20,20,20,10,10] / [0.8,0.8,0.8,0.8,0.5,0.5] -->
+<param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
+<param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
+<!-- 可选：Ctrl+C / deactivate 时先插值到 shutdown_home 再阻尼（默认 false） -->
+<param name="shutdown_return_home">true</param>
+<param name="shutdown_home">[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]</param>
+<param name="shutdown_home_velocity">0.3</param>
+<param name="shutdown_home_timeout">2.0</param>
 ```
 
-**注意：** 可用的 Python 版本包括 3.8, 3.9, 3.10, 3.11, 3.12。请根据您的系统选择合适的版本。
+Lift2S 真机 xacro 已打开上述关机回零；单臂 / ACone 默认仅 `set_to_damping`。故障路径（`on_error`）一律只阻尼、不插值。
 
-#### 1.2 编译 SDK
+## `full_control` 下发映射（OCS2 MIX）
 
-在 conda 环境中编译 SDK：
-
-```bash
-# 确保在 SDK 目录下
-conda activate arx-py312
-cd ~/ros2_ws/src/arms_ros2_control/hardwares/arx_ros2_control/external/arx5-sdk
-
-# 创建构建目录
-mkdir -p build
-cd build
-
-# 配置 CMake
-cmake ..
-
-# 编译
-make -j$(nproc)
-
-```
-
-编译完成后，会在 `build` 目录下生成 `libArxJointController.so` 和 `libArxCartesianController.so` 等库文件。
-
-**重要提示：** 
-- 编译 SDK 时必须在 conda 环境中（`conda activate arx-py312`）
-- 主包的 CMakeLists.txt 会链接 `${ARX5_SDK_DIR}/build/libArxJointController.so`，因此 SDK 必须先编译
-
-### 2. 编译 ROS2 包
-
-编译完 SDK 后，回到工作空间根目录编译 ROS2 包：
+| 量 | 来源 | SDK |
+|----|------|-----|
+| position | OCS2 轨迹 | `JointState.pos` |
+| velocity | OCS2 `future_input` | `JointState.vel` |
+| effort（重力/静力学前馈） | OCS2 | `JointState.torque` |
+| kp / kd | HI `joint_k_gains` / `joint_d_gains` | `set_gain` |
 
 ```bash
-cd ~/ros2_ws
-colcon build --packages-select arx_ros2_control
+./quick_start.sh   # Build → 真机包；Launch → 自动预启 Zenoh；单臂可选左/右
+
+# 手动 launch（RMW=zenoh 时先另开终端: ros2 run rmw_zenoh_cpp rmw_zenohd）
+source ~/lift2s-ws/install/setup.bash
+ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can1
+ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can3
+ros2 launch ocs2_arm_controller demo.launch.py robot:=arx_acone hardware:=real
+ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:=real
 ```
 
+## 升降（`ArxLiftHardware`）
 
+| `lift_motor_mode` | 说明 |
+|-------------------|------|
+| `hybrid`（默认） | `sendLiftHybrid`；跟踪 pos+vel；HI 重力/摩擦前馈 |
+| `soft_p` / `position` | Soft-P `setHeight`；仅跟踪 position |
+
+## 依赖
+
+### ROS2
+- `hardware_interface` / `pluginlib` / `rclcpp` / `rclcpp_lifecycle` / `std_msgs`
+
+### Vendored（`external/`）
+
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| arx5-sdk | `external/arx5-sdk/` | 头文件；`lib/<arch>/libhardware.so`、`libsolver.so`（含 aarch64） |
+| arx_lift_src | `external/arx_lift_src/` | Lift2S：`lib/<arch>/libarx_lift_src.so`（目前仅 x86_64；缺档时 CMake 跳过 `ArxLiftHardware`） |
+| SOEM | `external/SOEM/lib/<arch>/libsoem.so` | x86 `libhardware.so` 运行时依赖（1.4.x）；aarch64 `libhardware` 已静态内嵌 SOEM，可不提供 |
