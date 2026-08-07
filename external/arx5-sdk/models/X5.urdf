@@ -18,21 +18,6 @@
                 iyz="-1.696e-6"
                 izz="1.917e-4" />
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/base_link.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.75294 0.75294 0.75294 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/base_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <link name="link1">
         <inertial>
@@ -40,21 +25,6 @@
             <mass value="0.064"/>
             <inertia ixx="0.00008" ixy="0.00000" ixz="0.00001" iyy="0.00003" iyz="0.00000" izz="0.00007"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link1.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.75294 0.75294 0.75294 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link1.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="joint1" type="revolute">
         <origin xyz="0 0 0.0603" rpy="0 0 0"/>
@@ -74,21 +44,6 @@
                 iyz="1.203e-8"
                 izz="0.03683489"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link2.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.75294 0.75294 0.75294 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link2.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="joint2" type="revolute">
         <origin xyz="0.02 0 0.0402" rpy="0 0 0"/>
@@ -108,21 +63,6 @@
                 iyz="1.346e-5"
                 izz="0.02329476"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link3.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.75294 0.75294 0.75294 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0.15 0 -0.055" rpy="0 1.5707963267948966 0"/>
-            <geometry>
-                <cylinder length="0.15" radius="0.02" />
-            </geometry>
-        </collision>
     </link>
     <joint name="joint3" type="revolute">
         <origin xyz="-0.264 0 0" rpy="-3.1416 0 0"/>
@@ -142,21 +82,6 @@
                 iyz="-0.00001779"
                 izz="0.00011328"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link4.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.89804 0.91765 0.92941 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0.06575 -0.001 -0.02" rpy="0 0 0"/>
-            <geometry>
-                <cylinder length="0.05" radius="0.025" />
-            </geometry>
-        </collision>
     </link>
     <joint name="joint4" type="revolute">
         <origin xyz="0.245 0 -0.056" rpy="0 0 0"/>
@@ -179,23 +104,6 @@
                 iyz="-5.980e-7"
                 izz="0.00026961"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link5.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.75294 0.75294 0.75294 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin
-                xyz="0.055 0.00 0.083"
-                rpy="0 1.5707963267948966 0" />
-            <geometry>
-                <cylinder length="0.025" radius="0.02" />
-            </geometry>
-        </collision>
     </link>
     <joint name="joint5" type="revolute">
         <origin xyz="0.06575 -0.001 -0.0825" rpy="0 0 0"/>
@@ -210,21 +118,6 @@
             <mass value="0.581000"/>
             <inertia ixx="0.00029" ixy="0.00000" ixz="0.00000" iyy="0.00028" iyz="-0.00001" izz="0.00045"/>
         </inertial>
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link6.STL"/>
-            </geometry>
-            <material name="">
-                <color rgba="0.89804 0.91765 0.92941 1"/>
-            </material>
-        </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="./meshes/X5/link6.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="joint6" type="revolute">
         <origin xyz="0.02845 0 0.0825" rpy="-3.1416 0 0"/>
