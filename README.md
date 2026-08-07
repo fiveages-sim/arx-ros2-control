@@ -70,12 +70,13 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 ### ROS2
 - `hardware_interface` / `pluginlib` / `rclcpp` / `rclcpp_lifecycle` / `std_msgs`
 
-### 第三方（`external/`）
-- `arx5-sdk`：头文件 + `lib/<arch>/libhardware.so`、`libsolver.so`
-- `arx_lift_src`：`lib/<arch>/libarx_lift_src.so`（Lift2S）
-- **SOEM 1.4.x**（运行时）：`libhardware.so` 依赖 `libsoem.so`。构建时从以下路径择一安装到 `install/.../lib`：
-  - `$CONDA_PREFIX/lib/libsoem.so`
-  - `~/miniconda3/envs/arx-py312/lib/libsoem.so`
-  - `external/SOEM/lib/<arch>/libsoem.so`
-  - 安装示例：`conda install -n arx-py312 conda-forge::soem=1.4.0`（勿用 2.x，会缺 `EcatError`）
-- Eigen3 / orocos_kdl / kdl_parser / spdlog
+### Vendored（`external/`）
+
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| arx5-sdk | `external/arx5-sdk/` | 头文件；`lib/<arch>/libhardware.so`、`libsolver.so` |
+| arx_lift_src | `external/arx_lift_src/` | Lift2S：`lib/<arch>/libarx_lift_src.so` |
+| SOEM | `external/SOEM/lib/<arch>/libsoem.so` | `libhardware.so` 运行时依赖；当前提供 x86_64、**1.4.x**（勿用 2.x） |
+
+### 系统库
+- Eigen3、orocos_kdl、kdl_parser、spdlog
