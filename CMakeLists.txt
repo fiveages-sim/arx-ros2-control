@@ -43,6 +43,7 @@ include_directories(
 )
 
 # Prefer existing ArxJointController; else build from SDK joint source.
+# Must not PUBLIC-link a non-exported CMake target into export_${PROJECT_NAME}.
 set(ARX5_JOINT_CTRL "")
 if(EXISTS "${ARX5_SDK_DIR}/build/libArxJointController.so")
   set(ARX5_JOINT_CTRL "${ARX5_SDK_DIR}/build/libArxJointController.so")
@@ -51,16 +52,33 @@ elseif(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/libArxJointController.so")
 endif()
 
 if(NOT ARX5_JOINT_CTRL)
+  # joint_controller depends on controller_base + utils (not in prebuilt libhardware.so).
+  # Building only joint_controller.cpp yields exit 127 at HI load:
+  #   undefined symbol: arx::Arx5ControllerBase::Arx5ControllerBase(...)
   add_library(ArxJointController SHARED
     ${ARX5_SDK_DIR}/src/app/joint_controller.cpp
+    ${ARX5_SDK_DIR}/src/app/controller_base.cpp
+    ${ARX5_SDK_DIR}/src/utils.cpp
   )
-  target_include_directories(ArxJointController PUBLIC
+  target_include_directories(ArxJointController PRIVATE
     ${ARX5_SDK_DIR}/include
     ${EIGEN3_INCLUDE_DIRS}
   )
-  target_link_libraries(ArxJointController PUBLIC
+  target_link_libraries(ArxJointController PRIVATE
     ${ARX5_LIB_DIR}/libhardware.so
     ${ARX5_LIB_DIR}/libsolver.so
+    spdlog::spdlog
+  )
+  # Vendored Stanford SDK is not -Werror clean (return-type / reorder / unused).
+  target_compile_options(ArxJointController PRIVATE
+    -Wno-error=return-type
+    -Wno-unused-variable
+    -Wno-reorder
+    -Wno-sign-compare
+  )
+  set_target_properties(ArxJointController PROPERTIES
+    BUILD_WITH_INSTALL_RPATH FALSE
+    INSTALL_RPATH "$ORIGIN"
   )
   set(ARX5_JOINT_CTRL ArxJointController)
 endif()
@@ -83,7 +101,8 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
   std_msgs
 )
 
-target_link_libraries(${PROJECT_NAME} PUBLIC
+# PRIVATE: HI is loaded via pluginlib; do not re-export SDK / joint .so into ament export.
+target_link_libraries(${PROJECT_NAME} PRIVATE
   ${ARX5_JOINT_CTRL}
   ${ARX5_LIB_DIR}/libhardware.so
   ${ARX5_LIB_DIR}/libsolver.so
@@ -146,7 +165,14 @@ install(
 )
 
 if(TARGET ArxJointController)
-  install(TARGETS ArxJointController LIBRARY DESTINATION lib)
+  # Same export set as ${PROJECT_NAME}: required when linked (even PRIVATE under ament).
+  install(
+    TARGETS ArxJointController
+    EXPORT export_${PROJECT_NAME}
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+  )
 elseif(EXISTS "${ARX5_JOINT_CTRL}")
   install(FILES ${ARX5_JOINT_CTRL} DESTINATION lib)
 endif()
