@@ -982,7 +982,7 @@ void ArxLiftHardware::interpolateLiftToShutdownHeight()
     return;
   }
 
-  // Temporarily use shutdown velocity for the ramp while loop_thread_ tracks.
+  // Use shutdown velocity for the ramp while loop_thread_ tracks.
   const double old_ramp = cmd_ramp_vel_mps_;
   cmd_ramp_vel_mps_ = std::min(speed, lift_max_vel_);
   lift_position_command_ = goal;

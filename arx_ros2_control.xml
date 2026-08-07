@@ -11,18 +11,8 @@
          type="arx_ros2_control::ArxLiftHardware"
          base_class_type="hardware_interface::SystemInterface">
     <description>
-      ARX Lift2S lift column (can5). Default hybrid; soft_p reserved.
+      ARX Lift2S lift column (can5). Default hybrid; soft_p also supported.
       Hybrid uses arx_lift.hybrid_kp/kd (+ HI gravity/friction feedforward).
     </description>
-  </class>
-  <class name="arxlift2s_ros2_control/ArxX5Hardware"
-         type="arx_ros2_control::ArxX5Hardware"
-         base_class_type="hardware_interface::SystemInterface">
-    <description>Alias of arx_ros2_control/ArxX5Hardware.</description>
-  </class>
-  <class name="arxlift2s_ros2_control/ArxLiftHardware"
-         type="arx_ros2_control::ArxLiftHardware"
-         base_class_type="hardware_interface::SystemInterface">
-    <description>Alias of arx_ros2_control/ArxLiftHardware.</description>
   </class>
 </library>

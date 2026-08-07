@@ -13,13 +13,12 @@ Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) + Lift 库封装�
 |--------|------|
 | `arx_ros2_control/ArxX5Hardware` | 单臂 SystemInterface；双臂时左右各实例化一次 |
 | `arx_ros2_control/ArxLiftHardware` | Lift2S 升降（默认 hybrid） |
-| `arxlift2s_ros2_control/*` | 旧插件名别名（兼容） |
 
 ## 臂控制（仅 `full_control` / MIT MIX）
 
 URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `kp/kd` 来自 HI `joint_k_gains` / `joint_d_gains`。
 
-**已移除**臂 `position` / `pd_control` 路径。若 URDF 仍写其它 `control_mode`，HI 会告警并忽略，按 full_control 运行。
+仅支持 `full_control`。若 URDF 写了其它 `control_mode`，HI 会告警并忽略，按 full_control 运行。
 
 夹爪保持 **position-only**（`gripper_kp` / `gripper_kd`）。
 
@@ -27,6 +26,7 @@ URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `
 <param name="control_mode">full_control</param>
 <!-- robot_model 由 HI 写死为 X5，不导出 ROS 参数（rqt 不可见）；URDF 里可省略 -->
 <param name="can_interface">can1</param>  <!-- 单臂右臂用 can3 -->
+<!-- 单臂 / ACone 默认；Lift2S 现场默认为 [20,20,20,20,10,10] / [0.8,0.8,0.8,0.8,0.5,0.5] -->
 <param name="joint_k_gains">[80.0, 70.0, 70.0, 30.0, 30.0, 20.0]</param>
 <param name="joint_d_gains">[2.0, 2.0, 2.0, 1.0, 1.0, 0.7]</param>
 <!-- 可选：Ctrl+C / deactivate 时先插值到 shutdown_home 再阻尼（默认 false） -->

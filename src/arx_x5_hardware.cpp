@@ -133,7 +133,7 @@ void ArxX5Hardware::declare_node_parameters()
 
     // robot_model is hardcoded to X5 (not a ROS param → hidden from rqt).
     ensure_string_param("can_interface", "can0", hw_find("can_interface"));
-    // control_mode kept for URDF backward compat; only full_control is supported.
+    // control_mode: URDF may still set it; only full_control is honored.
     ensure_string_param("control_mode", "full_control", hw_find("control_mode"));
     ensure_double_array_sized("joint_k_gains", kDefaultJointKGains, 6);
     ensure_double_array_sized("joint_d_gains", kDefaultJointDGains, 6);
@@ -194,7 +194,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
         }
     }
     can_interface_ = get_node_param("can_interface", std::string("can0"));
-    // Arm is full_control (MIT MIX) only. Reject legacy position / pd_control.
+    // Arm is full_control (MIT MIX) only; warn and ignore other control_mode values.
     {
         const std::string mode = get_node_param("control_mode", std::string("full_control"));
         if (mode != "full_control") {
