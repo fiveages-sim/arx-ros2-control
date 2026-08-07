@@ -74,9 +74,6 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 
 | 组件 | 路径 | 说明 |
 |------|------|------|
-| arx5-sdk | `external/arx5-sdk/` | 头文件；`lib/<arch>/libhardware.so`、`libsolver.so` |
-| arx_lift_src | `external/arx_lift_src/` | Lift2S：`lib/<arch>/libarx_lift_src.so` |
-| SOEM | `external/SOEM/lib/<arch>/libsoem.so` | `libhardware.so` 运行时依赖；当前提供 x86_64、**1.4.x**（勿用 2.x） |
-
-### 系统库
-- Eigen3、orocos_kdl、kdl_parser、spdlog
+| arx5-sdk | `external/arx5-sdk/` | 头文件；`lib/<arch>/libhardware.so`、`libsolver.so`（含 aarch64） |
+| arx_lift_src | `external/arx_lift_src/` | Lift2S：`lib/<arch>/libarx_lift_src.so`（目前仅 x86_64；缺档时 CMake 跳过 `ArxLiftHardware`） |
+| SOEM | `external/SOEM/lib/<arch>/libsoem.so` | x86 `libhardware.so` 运行时依赖（1.4.x）；aarch64 `libhardware` 已静态内嵌 SOEM，可不提供 |

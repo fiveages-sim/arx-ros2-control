@@ -33,6 +33,21 @@ endif()
 set(ARX5_LIB_DIR ${ARX5_SDK_DIR}/lib/${ARX_ARCH_DIR})
 set(ARX_LIFT_LIB ${ARX_LIFT_DIR}/lib/${ARX_ARCH_DIR}/libarx_lift_src.so)
 
+# arx_lift_src ships headers + prebuilt .so only (no sources). x86_64 is vendored;
+# aarch64 is not in tree history — skip Lift HI when the arch .so is missing so
+# arm builds can still produce ArxX5Hardware.
+set(ARX_HAS_LIFT OFF)
+if(EXISTS "${ARX_LIFT_LIB}")
+  set(ARX_HAS_LIFT ON)
+  message(STATUS "ArxLiftHardware enabled: ${ARX_LIFT_LIB}")
+else()
+  message(WARNING
+    "libarx_lift_src.so not found for ${ARX_ARCH_DIR} "
+    "(expected ${ARX_LIFT_LIB}). Skipping ArxLiftHardware compile/link/install; "
+    "arm/x86 arm-only builds get ArxX5Hardware only. Place the arch .so under "
+    "external/arx_lift_src/lib/${ARX_ARCH_DIR}/ to enable Lift2S.")
+endif()
+
 include_directories(
   include
   ${ARX5_SDK_DIR}/include
@@ -83,10 +98,12 @@ if(NOT ARX5_JOINT_CTRL)
   set(ARX5_JOINT_CTRL ArxJointController)
 endif()
 
-add_library(${PROJECT_NAME} SHARED
-  src/arx_x5_hardware.cpp
-  src/arx_lift_hardware.cpp
-)
+set(ARX_HI_SOURCES src/arx_x5_hardware.cpp)
+if(ARX_HAS_LIFT)
+  list(APPEND ARX_HI_SOURCES src/arx_lift_hardware.cpp)
+endif()
+
+add_library(${PROJECT_NAME} SHARED ${ARX_HI_SOURCES})
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -102,14 +119,21 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
 )
 
 # PRIVATE: HI is loaded via pluginlib; do not re-export SDK / joint .so into ament export.
-target_link_libraries(${PROJECT_NAME} PRIVATE
+set(ARX_HI_LINK_LIBS
   ${ARX5_JOINT_CTRL}
   ${ARX5_LIB_DIR}/libhardware.so
   ${ARX5_LIB_DIR}/libsolver.so
-  ${ARX_LIFT_LIB}
 )
+if(ARX_HAS_LIFT)
+  list(APPEND ARX_HI_LINK_LIBS ${ARX_LIFT_LIB})
+endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE ${ARX_HI_LINK_LIBS})
 
-pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control.xml)
+if(ARX_HAS_LIFT)
+  pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control.xml)
+else()
+  pluginlib_export_plugin_description_file(hardware_interface arx_ros2_control_no_lift.xml)
+endif()
 
 # Stanford libhardware.so needs SOEM 1.4.x at runtime (conda-forge::soem=1.4.0).
 # Prebuilt RPATH points at a foreign conda env; install a local copy into lib/.
@@ -129,6 +153,9 @@ foreach(candidate IN LISTS ARX5_SOEM_CANDIDATES)
 endforeach()
 if(ARX5_COMPATIBLE_SOEM_LIB)
   message(STATUS "Using compatible SOEM runtime library: ${ARX5_COMPATIBLE_SOEM_LIB}")
+elseif(ARX_ARCH_DIR STREQUAL "aarch64")
+  # Vendored aarch64 libhardware.so statically embeds SOEM; no separate libsoem needed.
+  message(STATUS "Skipping SOEM for aarch64 (statically linked into libhardware.so)")
 else()
   message(WARNING
     "Compatible libsoem.so not found. Real hardware will fail to load "
@@ -156,11 +183,15 @@ install(
   RUNTIME DESTINATION bin
 )
 
+set(ARX_INSTALL_VENDOR_LIBS
+  ${ARX5_LIB_DIR}/libhardware.so
+  ${ARX5_LIB_DIR}/libsolver.so
+)
+if(ARX_HAS_LIFT)
+  list(APPEND ARX_INSTALL_VENDOR_LIBS ${ARX_LIFT_LIB})
+endif()
 install(
-  FILES
-    ${ARX5_LIB_DIR}/libhardware.so
-    ${ARX5_LIB_DIR}/libsolver.so
-    ${ARX_LIFT_LIB}
+  FILES ${ARX_INSTALL_VENDOR_LIBS}
   DESTINATION lib
 )
 
