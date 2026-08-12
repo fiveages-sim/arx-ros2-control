@@ -18,9 +18,10 @@
  *
  * 控制路径概要：
  * - 后台线程 ~400 Hz：soft_p 斜坡跟踪 position；hybrid 直跟 position+velocity
- * - soft_p（position）：只用 position → setHeight/loop；忽略 vel/effort/kp/kd
+ * - soft_p（position）：只用 position → setHeight/loop；忽略 vel/effort
  * - hybrid：直接跟 position + velocity；HI τ_ff（重力 + 库仑摩擦·(-sign(v_cmd))）；
- *   忽略控制器 effort/kp/kd（防 OCS2 RNEA 双重前馈）；增益与前馈均可热调
+ *   忽略控制器 effort（防 OCS2 RNEA 双重前馈）；增益来自 arx_lift.* 热调
+ * - 可选底盘：enable_chassis_cmd_vel → 订阅 Twist → setChassisCmd(mode=1/2)
  * - ros2_control 的 read()/write() 不做电机闭环；write 仅调试日志与状态话题
  */
 
@@ -368,10 +369,108 @@ void ArxLiftHardware::sendHybridHoldOrTrack(double q_target_sdk, double dt_s)
   const double p_motor = -ramp_q_sdk_;
   const double v_motor = -v_d;
   const double kd_send = std::min(hy_kd, kHybridKdMax);
-  lift_->sendLiftHybrid(hy_kp, kd_send, p_motor, v_motor, t_ff);
+  if (enable_chassis_cmd_vel_) {
+    // SDK 仅在 write() 里发底盘帧；hybrid 绕过 Soft-P write，故先 write 再覆盖升降。
+    flushChassisWithHybridLift(hy_kp, kd_send, p_motor, v_motor, t_ff);
+  } else {
+    lift_->sendLiftHybrid(hy_kp, kd_send, p_motor, v_motor, t_ff);
+  }
 
   last_written_height_.store(ramp_q_sdk_);
   last_written_vel_.store(v_d);
+}
+
+void ArxLiftHardware::setupChassisCmdVelSubscription()
+{
+  teardownChassisCmdVelSubscription();
+  if (!enable_chassis_cmd_vel_) {
+    return;
+  }
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_WARN(
+      get_logger(),
+      "enable_chassis_cmd_vel=true but no ROS node; chassis mapping disabled");
+    return;
+  }
+
+  chassis_vx_.store(0.0);
+  chassis_vy_.store(0.0);
+  chassis_wz_.store(0.0);
+  chassis_cmd_stamp_ns_.store(0);
+
+  chassis_cmd_sub_ = node->create_subscription<geometry_msgs::msg::Twist>(
+    chassis_cmd_vel_topic_, rclcpp::SystemDefaultsQoS(),
+    [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
+      chassis_vx_.store(msg->linear.x);
+      chassis_vy_.store(msg->linear.y);
+      chassis_wz_.store(msg->angular.z);
+      chassis_cmd_stamp_ns_.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+    });
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Chassis cmd_vel mapping enabled: topic=%s timeout=%.2f s (mode 1 run / 2 park)",
+    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_);
+}
+
+void ArxLiftHardware::teardownChassisCmdVelSubscription()
+{
+  chassis_cmd_sub_.reset();
+  chassis_vx_.store(0.0);
+  chassis_vy_.store(0.0);
+  chassis_wz_.store(0.0);
+  chassis_cmd_stamp_ns_.store(0);
+}
+
+void ArxLiftHardware::applyChassisCmd(bool force_park)
+{
+  if (!lift_) {
+    return;
+  }
+
+  if (
+    !enable_chassis_cmd_vel_ || force_park || soft_stop_active_.load() ||
+    !command_enabled_.load())
+  {
+    lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
+    return;
+  }
+
+  const int64_t stamp_ns = chassis_cmd_stamp_ns_.load();
+  bool timed_out = (stamp_ns <= 0);
+  if (!timed_out) {
+    const auto now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+    const double age_s =
+      static_cast<double>(now_ns - stamp_ns) * 1e-9;
+    timed_out = age_s > chassis_cmd_timeout_sec_;
+  }
+
+  if (timed_out) {
+    lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
+    return;
+  }
+
+  // 官方 joy/VR：运行 mode=1；停车 mode=2
+  lift_->setChassisCmd(
+    chassis_vx_.load(), chassis_vy_.load(), chassis_wz_.load(), 1);
+}
+
+void ArxLiftHardware::flushChassisWithHybridLift(
+  double k_p, double k_d, double p_motor, double v_motor, double t_ff)
+{
+  if (!lift_) {
+    return;
+  }
+  // write()：Soft-P 升降 + 底盘；随后 Hybrid 覆盖升降电机帧。
+  lift_->write();
+  lift_->sendLiftHybrid(k_p, k_d, p_motor, v_motor, t_ff);
 }
 
 /** @brief 关闭指令门控并 join 后台循环线程。 */
@@ -390,6 +489,7 @@ void ArxLiftHardware::stop_loop_thread()
 ArxLiftHardware::~ArxLiftHardware()
 {
   stop_loop_thread();
+  teardownChassisCmdVelSubscription();
   param_cb_.reset();
   motor_pub_.reset();
   // 故意泄漏 lift_：厂商 SocketCAN 收包线程仍在跑时销毁 LiftHeadControlLoop
@@ -591,14 +691,32 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   safe_exit_done_ = false;
   soft_stop_active_ = false;
 
+  parse_bool_param(
+    info_, "enable_chassis_cmd_vel", false, enable_chassis_cmd_vel_);
+  chassis_cmd_vel_topic_ =
+    get_hw_param(info_, "chassis_cmd_vel_topic", "/cmd_vel");
+  if (chassis_cmd_vel_topic_.empty()) {
+    chassis_cmd_vel_topic_ = "/cmd_vel";
+  }
+  if (!parse_double_param(
+      info_, "chassis_cmd_timeout", 0.3, chassis_cmd_timeout_sec_,
+      get_logger()))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (
+    !std::isfinite(chassis_cmd_timeout_sec_) ||
+    chassis_cmd_timeout_sec_ <= 0.0)
+  {
+    chassis_cmd_timeout_sec_ = 0.3;
+  }
+
   lift_position_ = 0.0;
   lift_velocity_ = 0.0;
   lift_effort_ = 0.0;
   lift_position_command_ = 0.0;
   lift_velocity_command_ = 0.0;
   lift_effort_command_ = 0.0;
-  lift_kp_command_ = 0.0;
-  lift_kd_command_ = 0.0;
   command_enabled_ = false;
   last_written_height_ = 0.0;
   last_written_vel_ = 0.0;
@@ -610,13 +728,15 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "ArxLiftHardware init: joint=%s can=%s robot_type=%d "
     "motor_mode=%s soft_p_kp=%.3f hybrid_kp=%.3f hybrid_kd=%.3f "
     "gravity=%.3f coulomb_friction=%.3f friction_vel_eps=%.4f m/s "
-    "ramp=%.3f m/s shutdown_return_home=%s height=%.3f",
+    "ramp=%.3f m/s shutdown_return_home=%s height=%.3f "
+    "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s",
     lift_joint_name_.c_str(), can_name_.c_str(), robot_type_,
     motor_mode_param_.c_str(), soft_p_kp_.load(), hybrid_kp_.load(),
     hybrid_kd_.load(), gravity_compensation_torque_.load(),
     coulomb_friction_torque_.load(), friction_vel_eps_mps_.load(),
     cmd_ramp_vel_mps_, shutdown_return_home_ ? "true" : "false",
-    shutdown_height_m_);
+    shutdown_height_m_, enable_chassis_cmd_vel_ ? "true" : "false",
+    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -639,9 +759,9 @@ ArxLiftHardware::on_export_state_interfaces()
 }
 
 /**
- * @brief 导出 MIX 指令接口，供 ocs2_wbc claim。
- * @note soft_p（WBC 默认）：只用 position；velocity/effort/kp/kd 可写但不下发电机。
- *       hybrid：直跟 position+velocity + HI τ_ff；kp/kd 仍由 arx_lift.* 决定。
+ * @brief 导出 pos/vel/effort 指令接口，供 ocs2_wbc claim。
+ * @note soft_p：只用 position；velocity/effort 可写但不下发电机。
+ *       hybrid：直跟 position+velocity + HI τ_ff；增益由 arx_lift.* 决定（无 kp/kd command IF）。
  */
 std::vector<hardware_interface::CommandInterface::SharedPtr>
 ArxLiftHardware::on_export_command_interfaces()
@@ -659,12 +779,6 @@ ArxLiftHardware::on_export_command_interfaces()
     std::make_shared<hardware_interface::CommandInterface>(
       lift_joint_name_, hardware_interface::HW_IF_EFFORT,
       &lift_effort_command_));
-  command_interfaces.push_back(
-    std::make_shared<hardware_interface::CommandInterface>(
-      lift_joint_name_, "kp", &lift_kp_command_));
-  command_interfaces.push_back(
-    std::make_shared<hardware_interface::CommandInterface>(
-      lift_joint_name_, "kd", &lift_kd_command_));
   return command_interfaces;
 }
 
@@ -699,6 +813,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
       hybrid_kd_.load(), gravity_compensation_torque_.load(),
       coulomb_friction_torque_.load(), friction_vel_eps_mps_.load(),
       status_debug_.load());
+
+    setupChassisCmdVelSubscription();
 
     if (auto node = get_node()) {
       motor_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -738,6 +854,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
           if (soft_stop_active_.load()) {
             // Soft stop at height: keep gravity τ_ff (τ=0 while elevated buzzes/drops).
             // hybrid: kp≈0 + kd + gravity; soft_p: hold current height.
+            applyChassisCmd(/*force_park=*/true);
             const double q_hold = sdk_get_height_.load();
             ramp_q_sdk_ = q_hold;
             const int mode_i = motor_mode_.load();
@@ -755,17 +872,23 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
                 lift_max_torque_);
               lift_->read();
               lift_->exchangeLiftMotorMsg();
-              lift_->sendLiftHybrid(0.0, hy_kd, -q_hold, 0.0, t_ff);
+              if (enable_chassis_cmd_vel_) {
+                flushChassisWithHybridLift(0.0, hy_kd, -q_hold, 0.0, t_ff);
+              } else {
+                lift_->sendLiftHybrid(0.0, hy_kd, -q_hold, 0.0, t_ff);
+              }
             }
             last_written_height_.store(q_hold);
             last_written_vel_.store(0.0);
           } else if (!command_enabled_.load()) {
             // 校准 / 停车：始终 Soft-P loop()
+            applyChassisCmd(/*force_park=*/true);
             lift_->config_.lift_kp = soft_p_kp_.load();
             lift_->loop();
             ramp_initialized_ = false;
             last_applied_mode_ = -1;
           } else {
+            applyChassisCmd(/*force_park=*/false);
             const double q_target = rosToSdk(lift_position_command_);
             if (!ramp_initialized_) {
               ramp_q_sdk_ = sdk_get_height_.load();
@@ -869,6 +992,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
   } catch (const std::exception & e) {
     RCLCPP_ERROR(get_logger(), "Failed to activate ArxLiftHardware: %s", e.what());
     stop_loop_thread();
+    teardownChassisCmdVelSubscription();
     param_cb_.reset();
     lift_.reset();
     return hardware_interface::CallbackReturn::ERROR;
@@ -883,6 +1007,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_deactivate(
 {
   RCLCPP_INFO(get_logger(), "ArxLiftHardware on_deactivate: enterSafeExit");
   enterSafeExit(/*allow_return_home=*/true);
+  teardownChassisCmdVelSubscription();
   param_cb_.reset();
   motor_pub_.reset();
   RCLCPP_INFO(get_logger(), "ArxLiftHardware deactivated");
@@ -897,6 +1022,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_shutdown(
 {
   RCLCPP_INFO(get_logger(), "ArxLiftHardware on_shutdown: enterSafeExit");
   enterSafeExit(/*allow_return_home=*/true);
+  teardownChassisCmdVelSubscription();
   param_cb_.reset();
   motor_pub_.reset();
   RCLCPP_INFO(
@@ -913,6 +1039,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_error(
 {
   RCLCPP_ERROR(get_logger(), "ArxLiftHardware on_error: soft stop only");
   enterSafeExit(/*allow_return_home=*/false);
+  teardownChassisCmdVelSubscription();
   param_cb_.reset();
   motor_pub_.reset();
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -947,6 +1074,8 @@ void ArxLiftHardware::enterSafeExit(bool allow_return_home)
   if (lift_) {
     try {
       lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
+      // 线程已停；尽量再 write 一次把停车帧刷到 CAN（顺带 Soft-P，可接受）。
+      lift_->write();
     } catch (const std::exception & e) {
       RCLCPP_WARN(get_logger(), "Chassis park on safe exit failed: %s", e.what());
     }

@@ -19,12 +19,14 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "arx_lift_src/lift_head_control_loop.h"
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <thread>
@@ -41,6 +43,10 @@ namespace arx_ros2_control
  * - ``hybrid``（默认）— ``sendLiftHybrid``；跟踪 position+velocity；
  *   kp/kd = ``arx_lift.hybrid_kp/kd``；
  *   ``τ_ff = gravity - coulomb * sign(v_cmd)``（忽略上层 effort）
+ *
+ * 底盘（可选，URDF ``enable_chassis_cmd_vel``）：
+ * - 订阅 ``chassis_cmd_vel_topic``（默认 ``/cmd_vel``）→ ``setChassisCmd``
+ * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -96,6 +102,11 @@ private:
   void enterSafeExit(bool allow_return_home);
   void interpolateLiftToShutdownHeight();
   void softStopLift();
+  void setupChassisCmdVelSubscription();
+  void teardownChassisCmdVelSubscription();
+  void applyChassisCmd(bool force_park);
+  void flushChassisWithHybridLift(
+    double k_p, double k_d, double p_motor, double v_motor, double t_ff);
 
   double rosToSdk(double ros_m) const
   {
@@ -118,8 +129,6 @@ private:
   double lift_position_command_{0.0};
   double lift_velocity_command_{0.0};
   double lift_effort_command_{0.0};
-  double lift_kp_command_{0.0};
-  double lift_kd_command_{0.0};
 
   std::string can_name_{"can5"};
   int robot_type_{0};
@@ -160,6 +169,17 @@ private:
   double shutdown_home_velocity_{0.10};
   double shutdown_home_timeout_sec_{2.0};
   std::atomic<bool> safe_exit_done_{false};
+
+  /** URDF：是否订阅 cmd_vel 并映射到底盘（默认关）。 */
+  bool enable_chassis_cmd_vel_{false};
+  std::string chassis_cmd_vel_topic_{"/cmd_vel"};
+  double chassis_cmd_timeout_sec_{0.3};
+  std::atomic<double> chassis_vx_{0.0};
+  std::atomic<double> chassis_vy_{0.0};
+  std::atomic<double> chassis_wz_{0.0};
+  /** steady_clock ns；0 表示尚未收到指令（按超时停车）。 */
+  std::atomic<int64_t> chassis_cmd_stamp_ns_{0};
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
 
   std::atomic<double> motor_position_{0.0};
   std::atomic<double> motor_velocity_{0.0};

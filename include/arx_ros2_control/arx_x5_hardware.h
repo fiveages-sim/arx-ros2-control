@@ -95,8 +95,6 @@ private:
     std::vector<double> position_commands_;
     std::vector<double> velocity_commands_;
     std::vector<double> effort_commands_;
-    std::vector<double> kp_commands_;
-    std::vector<double> kd_commands_;
 
     bool has_gripper_;
     std::vector<std::string> gripper_joint_names_;

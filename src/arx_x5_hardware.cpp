@@ -229,8 +229,6 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_init(
     position_commands_.resize(joint_count_, 0.0);
     velocity_commands_.resize(joint_count_, 0.0);
     effort_commands_.resize(joint_count_, 0.0);
-    kp_commands_.resize(joint_count_, 0.0);
-    kd_commands_.resize(joint_count_, 0.0);
 
     if (has_gripper_) {
         const size_t gripper_count = gripper_joint_names_.size();
@@ -303,7 +301,8 @@ std::vector<hardware_interface::StateInterface::ConstSharedPtr> ArxX5Hardware::o
 }
 
 std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_export_command_interfaces() {
-    // Export MIX interfaces (position/velocity/effort/kp/kd) to match interfaces.xacro.
+    // Export MIX interfaces (position/velocity/effort) to match interfaces.xacro.
+    // MIT kp/kd are HI params only (joint_k_gains / joint_d_gains), not command IFs.
     std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
     for (size_t i = 0; i < joint_count_; ++i) {
@@ -313,10 +312,6 @@ std::vector<hardware_interface::CommandInterface::SharedPtr> ArxX5Hardware::on_e
             joint_names_[i], hardware_interface::HW_IF_VELOCITY, &velocity_commands_[i]));
         command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
             joint_names_[i], hardware_interface::HW_IF_EFFORT, &effort_commands_[i]));
-        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
-            joint_names_[i], "kp", &kp_commands_[i]));
-        command_interfaces.push_back(std::make_shared<hardware_interface::CommandInterface>(
-            joint_names_[i], "kd", &kd_commands_[i]));
     }
 
     if (has_gripper_) {
@@ -348,10 +343,7 @@ hardware_interface::CallbackReturn ArxX5Hardware::on_configure(
     gripper_kd_ = get_node_param("gripper_kd", kDefaultGripperKD);
     status_debug_.store(get_node_param("status_debug", false));
 
-    // Seed command gains from parameter defaults (OCS2 may overwrite).
     for (size_t i = 0; i < joint_count_; ++i) {
-        kp_commands_[i] = (i < joint_k_gains_.size()) ? joint_k_gains_[i] : kDefaultJointKGains[std::min(i, kDefaultJointKGains.size() - 1)];
-        kd_commands_[i] = (i < joint_d_gains_.size()) ? joint_d_gains_[i] : kDefaultJointDGains[std::min(i, kDefaultJointDGains.size() - 1)];
         velocity_commands_[i] = 0.0;
         effort_commands_[i] = 0.0;
     }
@@ -726,8 +718,7 @@ hardware_interface::return_type ArxX5Hardware::write(
             cmd.gripper_pos = gpos * 2.0;
         }
 
-        // MIT kp/kd from HI joint_k/d_gains (panthera-ht: pos/vel/tqe each write;
-        // gains here — not from controller pd_gains/default_gains command IF).
+        // MIT kp/kd from HI joint_k/d_gains only (no controller kp/kd command IF).
         // Force re-apply every write so rqt changes take effect under OCS2 tracking.
         std::vector<double> kp;
         std::vector<double> kd;
@@ -739,14 +730,6 @@ hardware_interface::return_type ArxX5Hardware::write(
             kd = joint_d_gains_;
             gripper_kp = gripper_kp_;
             gripper_kd = gripper_kd_;
-        }
-        for (size_t i = 0; i < joint_count_; ++i) {
-            if (i < kp.size()) {
-                kp_commands_[i] = kp[i];
-            }
-            if (i < kd.size()) {
-                kd_commands_[i] = kd[i];
-            }
         }
         applyGains(kp, kd, gripper_kp, gripper_kd, true);
 

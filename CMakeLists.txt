@@ -15,6 +15,7 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
@@ -116,6 +117,7 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
   rclcpp
   rclcpp_lifecycle
   std_msgs
+  geometry_msgs
 )
 
 # PRIVATE: HI is loaded via pluginlib; do not re-export SDK / joint .so into ament export.
@@ -222,6 +224,7 @@ ament_export_dependencies(
   rclcpp
   rclcpp_lifecycle
   std_msgs
+  geometry_msgs
 )
 
 ament_package()

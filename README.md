@@ -16,7 +16,7 @@ Stanford [arx5-sdk](https://github.com/real-stanford/arx5-sdk) + Lift 库封装�
 
 ## 臂控制（仅 `full_control` / MIT MIX）
 
-URDF 声明 MIX 接口；`write()` **始终**下发 `pos + vel + effort`，MIT `kp/kd` 来自 HI `joint_k_gains` / `joint_d_gains`。
+URDF 声明 `position/velocity/effort`；`write()` **始终**下发 `pos + vel + effort`，MIT `kp/kd` **仅**来自 HI `joint_k_gains` / `joint_d_gains`（无 kp/kd command IF）。
 
 仅支持 `full_control`。若 URDF 写了其它 `control_mode`，HI 会告警并忽略，按 full_control 运行。
 
@@ -64,6 +64,17 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 |-------------------|------|
 | `hybrid`（默认） | `sendLiftHybrid`；跟踪 pos+vel；HI 重力/摩擦前馈 |
 | `soft_p` / `position` | Soft-P `setHeight`；仅跟踪 position |
+
+### 底盘 `cmd_vel`（可选）
+
+| hardware 参数 | 默认 | 说明 |
+|---------------|------|------|
+| `enable_chassis_cmd_vel` | `false` | 订阅 Twist → `setChassisCmd` |
+| `chassis_cmd_vel_topic` | `/cmd_vel` | 话题名 |
+| `chassis_cmd_timeout` | `0.3` | 超时停车（s）；mode=2 |
+
+映射：`linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`；有指令 mode=1，超时/退出 mode=2。  
+xacro 可用 `enable_chassis_cmd_vel:=true`（勿与 WBC 底盘规划同时抢同一套指令）。
 
 ## 依赖
 
