@@ -46,6 +46,9 @@ namespace arx_ros2_control
  *
  * 底盘（可选，URDF ``enable_chassis_cmd_vel``）：
  * - 订阅 ``chassis_cmd_vel_topic``（默认 ``/cmd_vel``）→ ``setChassisCmd``
+ * - Twist ``vx/vy/wz`` 原样（对齐 body_communicator；勿套 PosCmd ``-chy``）
+ * - hybrid：升降 sendLiftHybrid；底盘 vx/vy/wz 走 sendChassisOnly（不绑 Soft-P）
+ * - soft_p：loop()（含底盘）；OCS2 全身请用 hybrid
  * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
@@ -98,15 +101,20 @@ private:
     double hybrid_kd, double gravity_comp, double coulomb_friction,
     double friction_vel_eps_mps, bool status_debug);
   double computeHybridFeedforward(double v_cmd_sdk) const;
-  void sendHybridHoldOrTrack(double q_target_sdk, double dt_s);
+  /** @param chassis_active 本周期底盘是否 mode=1。 */
+  void sendHybridHoldOrTrack(
+    double q_target_sdk, double dt_s, bool chassis_active);
   void enterSafeExit(bool allow_return_home);
   void interpolateLiftToShutdownHeight();
   void softStopLift();
   void setupChassisCmdVelSubscription();
   void teardownChassisCmdVelSubscription();
-  void applyChassisCmd(bool force_park);
-  void flushChassisWithHybridLift(
-    double k_p, double k_d, double p_motor, double v_motor, double t_ff);
+  /** @return true 若底盘为运行 mode=1（有有效 cmd_vel）。 */
+  bool applyChassisCmd(bool force_park);
+  /** Hybrid 路径：只发 0x701/0x703（不 Soft-P 升降）。 */
+  void flushChassisCanOnly();
+  /** Hybrid 停车：最多刷一次 mode=2 底盘帧。 */
+  void flushChassisParkOnce();
 
   double rosToSdk(double ros_m) const
   {
@@ -170,15 +178,21 @@ private:
   double shutdown_home_timeout_sec_{2.0};
   std::atomic<bool> safe_exit_done_{false};
 
-  /** URDF：是否订阅 cmd_vel 并映射到底盘（默认关）。 */
+  /** URDF：是否订阅 cmd_vel 并映射到底盘（Lift2S xacro 默认开）。 */
   bool enable_chassis_cmd_vel_{false};
   std::string chassis_cmd_vel_topic_{"/cmd_vel"};
   double chassis_cmd_timeout_sec_{0.3};
+  /** setChassisCmd 量化上限；LIFTS 的 SDK 未初始化，须 HI 写入。 */
+  double chassis_max_vel_x_{2.0};
+  double chassis_max_vel_y_{2.0};
+  double chassis_max_vel_z_{4.0};
   std::atomic<double> chassis_vx_{0.0};
   std::atomic<double> chassis_vy_{0.0};
   std::atomic<double> chassis_wz_{0.0};
   /** steady_clock ns；0 表示尚未收到指令（按超时停车）。 */
   std::atomic<int64_t> chassis_cmd_stamp_ns_{0};
+  /** Hybrid 下 mode=2 停车帧是否已刷过。 */
+  bool chassis_park_flushed_{false};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
 
   std::atomic<double> motor_position_{0.0};

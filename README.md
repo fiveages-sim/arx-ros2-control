@@ -69,12 +69,16 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_cmd_vel` | `false` | 订阅 Twist → `setChassisCmd` |
+| `enable_chassis_cmd_vel` | `true`（xacro 默认） | 订阅 Twist → `setChassisCmd` |
 | `chassis_cmd_vel_topic` | `/cmd_vel` | 话题名 |
 | `chassis_cmd_timeout` | `0.3` | 超时停车（s）；mode=2 |
+| `chassis_max_vel_{x,y,z}` | `2/2/4` | `setChassisCmd` 量化上限；**LIFTS 的 .so 未写这些，必须由 HI 补** |
 
-映射：`linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`；有指令 mode=1，超时/退出 mode=2。  
-xacro 可用 `enable_chassis_cmd_vel:=true`（勿与 WBC 底盘规划同时抢同一套指令）。
+映射：`linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`（ROS Twist 原样）；mode=1 运行 / mode=2 停车。  
+**hybrid（OCS2 推荐）**：升降每拍 `sendLiftHybrid`；底盘 `vx/vy/wz` 每拍 `sendChassisOnly`（仅 `0x701/0x703`，**不绑 Soft-P**）。  
+soft_p：`loop()` 同时带升降+底盘；全身 OCS2 下易掉柱，仅适合 HOME/点动。  
+`chassis_max_vel_{x,y,z}` 须由 HI 写入（LIFTS 的 .so 未初始化）。  
+Lift2S xacro 默认开；若与 WBC 底盘规划抢指令可传 `enable_chassis_cmd_vel:=false`。
 
 ## 依赖
 

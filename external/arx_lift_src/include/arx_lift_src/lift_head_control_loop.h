@@ -97,6 +97,34 @@ class LiftHeadControlLoop {
     return socket_can_.ExchangeData(&frame);
   }
 
+  /**
+   * Send chassis only (0x701 Cmd1 + 0x703 Cmd2). Does NOT Soft-P the lift.
+   * Pair with sendLiftHybrid so OCS2 can keep Hybrid hold while cmd_vel runs.
+   * Requires setChassisCmd / setWheelVel first; max_vel_* must be valid (LIFTS).
+   */
+  bool sendChassisOnly()
+  {
+    CanFrame f1 = chassis_.packChassisCmd1(p_x_, p_y_, p_z_, mode_);
+    if (!socket_can_.ExchangeData(&f1)) {
+      return false;
+    }
+    CanFrame f2 = chassis_.packChassisCmd2(
+      wheel1_vel_, wheel2_vel_, wheel3_vel_, wheel4_vel_);
+    return socket_can_.ExchangeData(&f2);
+  }
+
+  /**
+   * SDK setRobotType(LIFTS) never fills max_vel_{x,y,z}_ (LIFT/X7S do).
+   * Uninitialized limits make setChassisCmd quantize vy/wz to garbage → only
+   * vx may appear to work. Call after construction for robot_type==LIFTS (or any).
+   */
+  void setChassisVelocityLimits(double max_x, double max_y, double max_z)
+  {
+    max_vel_x_ = max_x;
+    max_vel_y_ = max_y;
+    max_vel_z_ = max_z;
+  }
+
  protected:
   double max_height_ = 20;
   double lift_motor_pos_des_{}, waist_motor_pos_des_{}, head_yaw_motor_pos_des_{},

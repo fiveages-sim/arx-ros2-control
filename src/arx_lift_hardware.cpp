@@ -21,8 +21,7 @@
  * - soft_p（position）：只用 position → setHeight/loop；忽略 vel/effort
  * - hybrid：直接跟 position + velocity；HI τ_ff（重力 + 库仑摩擦·(-sign(v_cmd))）；
  *   忽略控制器 effort（防 OCS2 RNEA 双重前馈）；增益来自 arx_lift.* 热调
- * - 可选底盘：enable_chassis_cmd_vel → 订阅 Twist → setChassisCmd(mode=1/2)
- * - ros2_control 的 read()/write() 不做电机闭环；write 仅调试日志与状态话题
+ * - 可选底盘：vx/vy/wz → setChassisCmd + sendChassisOnly；升降 Hybrid 独立
  */
 
 #include "arx_ros2_control/arx_lift_hardware.h"
@@ -338,29 +337,27 @@ double ArxLiftHardware::computeHybridFeedforward(double v_cmd_sdk) const
  *
  * τ_ff = gravity − μ·sign(v_cmd)（热调 arx_lift.*），再限幅。
  * **故意忽略** 上层 effort（全身 OCS2 RNEA），避免与 HI 前馈双重叠加过流。
- * 位置/速度按电机坐标系取负（与 getHeight = -motor.position 一致）。
- * 忽略控制器 effort/kp/kd 指令接口。
+ *
+ * 底盘 vx/vy/wz：setChassisCmd 后 sendChassisOnly()（仅 0x701/0x703），
+ * **不**走 Soft-P write/loop，故可与 Hybrid 持高并存（需 max_vel_* 已初始化）。
  */
-void ArxLiftHardware::sendHybridHoldOrTrack(double q_target_sdk, double dt_s)
+void ArxLiftHardware::sendHybridHoldOrTrack(
+  double q_target_sdk, double dt_s, bool chassis_active)
 {
   if (!lift_) {
     return;
   }
   (void)dt_s;
 
-  // 位置：直接跟上层目标（无 HI 斜坡）
   ramp_q_sdk_ = std::clamp(q_target_sdk, 0.0, sdk_max_rad_);
   ramp_initialized_ = true;
 
-  // 速度：上层 m/s → SDK rad/s，再按 lift_max_vel 限幅
   double v_d = lift_velocity_command_ * height_rad_per_meter_;
   const double v_max = lift_max_vel_ * height_rad_per_meter_;
   v_d = std::clamp(v_d, -v_max, v_max);
 
   const double hy_kp = hybrid_kp_.load();
   const double hy_kd = hybrid_kd_.load();
-
-  // HI 重力 + 库仑摩擦前馈；不叠加 lift_effort_command_
   const double t_ff = computeHybridFeedforward(v_d);
   (void)lift_effort_command_;
 
@@ -369,15 +366,38 @@ void ArxLiftHardware::sendHybridHoldOrTrack(double q_target_sdk, double dt_s)
   const double p_motor = -ramp_q_sdk_;
   const double v_motor = -v_d;
   const double kd_send = std::min(hy_kd, kHybridKdMax);
+
   if (enable_chassis_cmd_vel_) {
-    // SDK 仅在 write() 里发底盘帧；hybrid 绕过 Soft-P write，故先 write 再覆盖升降。
-    flushChassisWithHybridLift(hy_kp, kd_send, p_motor, v_motor, t_ff);
-  } else {
-    lift_->sendLiftHybrid(hy_kp, kd_send, p_motor, v_motor, t_ff);
+    if (chassis_active) {
+      chassis_park_flushed_ = false;
+      flushChassisCanOnly();
+    } else if (!chassis_park_flushed_) {
+      flushChassisParkOnce();
+    }
   }
+
+  lift_->sendLiftHybrid(hy_kp, kd_send, p_motor, v_motor, t_ff);
 
   last_written_height_.store(ramp_q_sdk_);
   last_written_vel_.store(v_d);
+}
+
+void ArxLiftHardware::flushChassisCanOnly()
+{
+  if (!lift_) {
+    return;
+  }
+  lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
+  lift_->sendChassisOnly();
+}
+
+void ArxLiftHardware::flushChassisParkOnce()
+{
+  if (!lift_ || chassis_park_flushed_) {
+    return;
+  }
+  flushChassisCanOnly();
+  chassis_park_flushed_ = true;
 }
 
 void ArxLiftHardware::setupChassisCmdVelSubscription()
@@ -399,6 +419,8 @@ void ArxLiftHardware::setupChassisCmdVelSubscription()
   chassis_wz_.store(0.0);
   chassis_cmd_stamp_ns_.store(0);
 
+  // ROS FLU Twist → setChassisCmd 原样（与 body_communicator / joy 一致）。
+  // 勿套用 PosCmd VR 的 -chy：那是 PosCmd 桥接约定，SDK 量化已对 Y 含符号。
   chassis_cmd_sub_ = node->create_subscription<geometry_msgs::msg::Twist>(
     chassis_cmd_vel_topic_, rclcpp::SystemDefaultsQoS(),
     [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
@@ -413,7 +435,8 @@ void ArxLiftHardware::setupChassisCmdVelSubscription()
 
   RCLCPP_INFO(
     get_logger(),
-    "Chassis cmd_vel mapping enabled: topic=%s timeout=%.2f s (mode 1 run / 2 park)",
+    "Chassis cmd_vel mapping enabled: topic=%s timeout=%.2f s "
+    "(mode 1 run / 2 park; Twist vx/vy/wz passthrough)",
     chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_);
 }
 
@@ -426,10 +449,10 @@ void ArxLiftHardware::teardownChassisCmdVelSubscription()
   chassis_cmd_stamp_ns_.store(0);
 }
 
-void ArxLiftHardware::applyChassisCmd(bool force_park)
+bool ArxLiftHardware::applyChassisCmd(bool force_park)
 {
   if (!lift_) {
-    return;
+    return false;
   }
 
   if (
@@ -437,7 +460,7 @@ void ArxLiftHardware::applyChassisCmd(bool force_park)
     !command_enabled_.load())
   {
     lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
-    return;
+    return false;
   }
 
   const int64_t stamp_ns = chassis_cmd_stamp_ns_.load();
@@ -454,23 +477,13 @@ void ArxLiftHardware::applyChassisCmd(bool force_park)
 
   if (timed_out) {
     lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
-    return;
+    return false;
   }
 
   // 官方 joy/VR：运行 mode=1；停车 mode=2
   lift_->setChassisCmd(
     chassis_vx_.load(), chassis_vy_.load(), chassis_wz_.load(), 1);
-}
-
-void ArxLiftHardware::flushChassisWithHybridLift(
-  double k_p, double k_d, double p_motor, double v_motor, double t_ff)
-{
-  if (!lift_) {
-    return;
-  }
-  // write()：Soft-P 升降 + 底盘；随后 Hybrid 覆盖升降电机帧。
-  lift_->write();
-  lift_->sendLiftHybrid(k_p, k_d, p_motor, v_motor, t_ff);
+  return true;
 }
 
 /** @brief 关闭指令门控并 join 后台循环线程。 */
@@ -711,6 +724,28 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     chassis_cmd_timeout_sec_ = 0.3;
   }
 
+  // LIFTS(setRobotType=2) 的 .so 不写 max_vel_*；缺省用 X7S 同档，可用 URDF 覆盖。
+  if (!parse_double_param(
+      info_, "chassis_max_vel_x", 2.0, chassis_max_vel_x_, get_logger()) ||
+    !parse_double_param(
+      info_, "chassis_max_vel_y", 2.0, chassis_max_vel_y_, get_logger()) ||
+    !parse_double_param(
+      info_, "chassis_max_vel_z", 4.0, chassis_max_vel_z_, get_logger()))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  auto ok_max = [](double v) { return std::isfinite(v) && v > 0.0; };
+  if (
+    !ok_max(chassis_max_vel_x_) || !ok_max(chassis_max_vel_y_) ||
+    !ok_max(chassis_max_vel_z_))
+  {
+    RCLCPP_ERROR(
+      get_logger(),
+      "chassis_max_vel_{x,y,z} must be finite and > 0 (got %.3f / %.3f / %.3f)",
+      chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   lift_position_ = 0.0;
   lift_velocity_ = 0.0;
   lift_effort_ = 0.0;
@@ -729,14 +764,16 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "motor_mode=%s soft_p_kp=%.3f hybrid_kp=%.3f hybrid_kd=%.3f "
     "gravity=%.3f coulomb_friction=%.3f friction_vel_eps=%.4f m/s "
     "ramp=%.3f m/s shutdown_return_home=%s height=%.3f "
-    "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s",
+    "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s "
+    "chassis_max_vel=%.2f/%.2f/%.2f",
     lift_joint_name_.c_str(), can_name_.c_str(), robot_type_,
     motor_mode_param_.c_str(), soft_p_kp_.load(), hybrid_kp_.load(),
     hybrid_kd_.load(), gravity_compensation_torque_.load(),
     coulomb_friction_torque_.load(), friction_vel_eps_mps_.load(),
     cmd_ramp_vel_mps_, shutdown_return_home_ ? "true" : "false",
     shutdown_height_m_, enable_chassis_cmd_vel_ ? "true" : "false",
-    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_);
+    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_,
+    chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -805,7 +842,16 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
     lift_->config_.lift_max_vel = lift_max_vel_;
     lift_->config_.lift_max_torque = lift_max_torque_;
 
-    // 底盘停车模式（mode=2）
+    // LIFTS: SDK setRobotType 不写 max_vel_*，必须补上，否则 vy/wz 量化失效。
+    lift_->setChassisVelocityLimits(
+      chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_);
+    RCLCPP_INFO(
+      get_logger(),
+      "Chassis velocity limits set to vx=%.2f vy=%.2f wz=%.2f (LIFTS SDK omits these)",
+      chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_);
+
+    // 底盘停车模式（mode=2）；轮速清零，避免 0x703 带未初始化值
+    lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
     lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
 
     setupDynamicParameters(
@@ -830,6 +876,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
     ramp_initialized_ = false;
     safe_exit_done_ = false;
     soft_stop_active_ = false;
+    chassis_park_flushed_ = false;
     using namespace std::chrono_literals;
     // 后台控制循环：soft_p 斜坡 / hybrid 直跟 + 刷新状态缓冲
     loop_thread_ = std::thread([this]() {
@@ -853,7 +900,6 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
 
           if (soft_stop_active_.load()) {
             // Soft stop at height: keep gravity τ_ff (τ=0 while elevated buzzes/drops).
-            // hybrid: kp≈0 + kd + gravity; soft_p: hold current height.
             applyChassisCmd(/*force_park=*/true);
             const double q_hold = sdk_get_height_.load();
             ramp_q_sdk_ = q_hold;
@@ -862,9 +908,12 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
               lift_->config_.lift_kp = soft_p_kp_.load();
               lift_->config_.gravity_compensation_torque =
                 gravity_compensation_torque_.load();
+              lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
               lift_->setHeight(q_hold);
               lift_->loop();
+              chassis_park_flushed_ = true;
             } else {
+              // Hybrid soft-stop：重力 τ_ff 持高；底盘 park 最多刷一次
               const double hy_kd =
                 std::min(std::max(hybrid_kd_.load(), 0.5), kHybridKdMax);
               const double t_ff = std::clamp(
@@ -872,11 +921,10 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
                 lift_max_torque_);
               lift_->read();
               lift_->exchangeLiftMotorMsg();
-              if (enable_chassis_cmd_vel_) {
-                flushChassisWithHybridLift(0.0, hy_kd, -q_hold, 0.0, t_ff);
-              } else {
-                lift_->sendLiftHybrid(0.0, hy_kd, -q_hold, 0.0, t_ff);
+              if (enable_chassis_cmd_vel_ && !chassis_park_flushed_) {
+                flushChassisParkOnce();
               }
+              lift_->sendLiftHybrid(0.0, hy_kd, -q_hold, 0.0, t_ff);
             }
             last_written_height_.store(q_hold);
             last_written_vel_.store(0.0);
@@ -885,10 +933,11 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
             applyChassisCmd(/*force_park=*/true);
             lift_->config_.lift_kp = soft_p_kp_.load();
             lift_->loop();
+            chassis_park_flushed_ = true;
             ramp_initialized_ = false;
             last_applied_mode_ = -1;
           } else {
-            applyChassisCmd(/*force_park=*/false);
+            const bool chassis_active = applyChassisCmd(/*force_park=*/false);
             const double q_target = rosToSdk(lift_position_command_);
             if (!ramp_initialized_) {
               ramp_q_sdk_ = sdk_get_height_.load();
@@ -900,7 +949,6 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
             const double hy_kp = hybrid_kp_.load();
             const double hy_kd = hybrid_kd_.load();
             if (mode_i != last_applied_mode_) {
-              // soft_p ↔ hybrid 切换时对齐斜坡，避免位置跳变
               ramp_q_sdk_ = sdk_get_height_.load();
               last_applied_mode_ = mode_i;
               RCLCPP_INFO(
@@ -911,7 +959,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
             }
 
             if (mode_i == static_cast<int>(MotorMode::SoftP)) {
-              // Soft-P / position：只用上层 position，忽略 vel/effort/kp/kd
+              // Soft-P：仅 position。OCS2 全身不推荐（易掉柱），请用 hybrid。
               const double v_ramp_sdk =
                 cmd_ramp_vel_mps_ * height_rad_per_meter_;
               const double err = q_target - ramp_q_sdk_;
@@ -929,17 +977,17 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
               }
               ramp_q_sdk_ = std::clamp(ramp_q_sdk_, 0.0, sdk_max_rad_);
 
-              // 故意不读 lift_velocity/effort/kp/kd_command_
               lift_->config_.lift_kp = soft_kp;
               lift_->config_.gravity_compensation_torque =
                 gravity_compensation_torque_.load();
               lift_->setHeight(ramp_q_sdk_);
               lift_->loop();
+              chassis_park_flushed_ = !chassis_active;
               last_written_height_.store(ramp_q_sdk_);
               last_written_vel_.store(v_d);
             } else {
-              // Hybrid：HI 重力+摩擦前馈；忽略上层 effort（见 sendHybridHoldOrTrack）
-              sendHybridHoldOrTrack(q_target, dt_s);
+              // Hybrid：OCS2 全身推荐路径（pos+vel+τ_ff 持高）
+              sendHybridHoldOrTrack(q_target, dt_s, chassis_active);
             }
           }
 
@@ -1073,9 +1121,9 @@ void ArxLiftHardware::enterSafeExit(bool allow_return_home)
 
   if (lift_) {
     try {
+      lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
       lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
-      // 线程已停；尽量再 write 一次把停车帧刷到 CAN（顺带 Soft-P，可接受）。
-      lift_->write();
+      lift_->sendChassisOnly();
     } catch (const std::exception & e) {
       RCLCPP_WARN(get_logger(), "Chassis park on safe exit failed: %s", e.what());
     }
