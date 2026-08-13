@@ -55,12 +55,13 @@ namespace arx_ros2_control
  * - soft_p：loop()（含底盘）；OCS2 全身请用 hybrid
  * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
  *
- * 底盘反馈 / 自解算 TF（可选，对齐官方 lift_controller + WBC）：
- * - ``enable_chassis_feedback``：``getOrientation/AngularVel/Accel`` → ``/arx_imu``；
+ * 底盘反馈 / 里程计（可选；官方无现成 odom，仅发 IMU+轮速）：
+ * - ``enable_chassis_feedback``：对齐官方 lift_controller —
+ *   ``getOrientation/AngularVel/Accel`` → ``/arx_imu``；
  *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
- * - ``enable_chassis_odom_tf``：差速航迹推算（IMU yaw + 已下发 ``vx`` 积分）→
- *   TF ``world→base_link``（WBC ``world_frame``/``baseFrame``）及 ``/arx_lift/odom``
- * - 无外部定位会漂；仅用于验证全身底盘控制链路
+ * - ``enable_chassis_odom``：用 **轮速正运动学 + IMU yaw** 积分发 ``/arx_lift/odom``
+ *   （**不用** ``cmd_vel``；几何默认取 Lift2S 三全向轮 URDF）
+ * - ``enable_chassis_odom_tf``：额外广播 ``world→base_link``（可选，默认关）
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -131,10 +132,16 @@ private:
   void setupChassisFeedbackPublishers();
   void teardownChassisFeedbackPublishers();
   /**
-   * 读 SDK 底盘反馈；可选发布 IMU/轮速；可选差速积分并发 world→base_link。
-   * @param dt_s 本周期时长；@param chassis_active 是否 mode=1 在跑。
+   * 读 SDK 底盘反馈；发布 IMU/轮速；可选由轮速+IMU 积分解算里程计。
+   * @param dt_s 本周期时长。
    */
-  void updateChassisFeedbackAndOdom(double dt_s, bool chassis_active);
+  void updateChassisFeedbackAndOdom(double dt_s);
+  /**
+   * Lift2S 三全向轮正运动学：ω[rad/s] → body (vx,vy,wz)。
+   * @return false 若几何奇异或输入非有限。
+   */
+  bool bodyTwistFromWheelVel(
+    const double wheel_vel[4], double & vx, double & vy, double & wz) const;
 
   double rosToSdk(double ros_m) const
   {
@@ -215,21 +222,28 @@ private:
   bool chassis_park_flushed_{false};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
 
-  /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选自解算 TF。 */
+  /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选轮速+IMU 里程计。 */
   bool enable_chassis_feedback_{true};
-  bool enable_chassis_odom_tf_{true};
+  bool enable_chassis_odom_{true};
+  bool enable_chassis_odom_tf_{false};
   std::string chassis_odom_parent_frame_{"world"};
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};
   std::string chassis_wheel_vel_topic_{"/arx_lift/wheel_vel"};
   std::string chassis_odom_topic_{"/arx_lift/odom"};
 
+  /** Lift2S 三全向轮（chassis.xacro）；Omnia150 默认半径 0.075 m。 */
+  double chassis_wheel_radius_m_{0.075};
+  double wheel_x_[3]{0.15361, 0.15361, -0.35293};
+  double wheel_y_[3]{0.29246, -0.29245, 0.0};
+  double wheel_yaw_[3]{1.0472, -1.0472, 3.1415};
+
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_vel_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-  /** 差速航迹：IMU yaw 相对零位 + 已下发 vx 积分（无相机雷达，会漂）。 */
+  /** 航迹：IMU yaw 相对零位 + 轮速正运动学得到的 body vx/vy 积分。 */
   std::mutex odom_mutex_;
   bool odom_yaw_initialized_{false};
   double odom_yaw0_{0.0};

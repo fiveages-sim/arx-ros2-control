@@ -22,7 +22,7 @@
  * - hybrid：直接跟 position + velocity；HI τ_ff（重力 + 库仑摩擦·(-sign(v_cmd))）；
  *   忽略控制器 effort（防 OCS2 RNEA 双重前馈）；增益来自 arx_lift.* 热调
  * - 可选底盘：vx/vy/wz → setChassisCmd + sendChassisOnly；升降 Hybrid 独立
- * - 可选反馈：SDK IMU/轮速 → /arx_imu、/arx_lift/wheel_vel；差速积分 → TF world→base_link
+ * - 可选反馈：SDK IMU/轮速（对齐官方）；可选轮速正运动学+IMU yaw → /arx_lift/odom
  */
 
 #include "arx_ros2_control/arx_lift_hardware.h"
@@ -33,6 +33,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include <Eigen/Dense>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 
@@ -407,7 +408,10 @@ void ArxLiftHardware::flushChassisParkOnce()
 void ArxLiftHardware::setupChassisFeedbackPublishers()
 {
   teardownChassisFeedbackPublishers();
-  if (!enable_chassis_feedback_ && !enable_chassis_odom_tf_) {
+  if (
+    !enable_chassis_feedback_ && !enable_chassis_odom_ &&
+    !enable_chassis_odom_tf_)
+  {
     return;
   }
   auto node = get_node();
@@ -434,19 +438,25 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
       chassis_wheel_vel_topic_, rclcpp::SystemDefaultsQoS());
     RCLCPP_INFO(
       get_logger(),
-      "Chassis feedback enabled: imu=%s wheel_vel=%s (official SDK getters)",
+      "Chassis feedback enabled (official lift_controller style): imu=%s "
+      "wheel_vel=%s",
       chassis_imu_topic_.c_str(), chassis_wheel_vel_topic_.c_str());
   }
-  if (enable_chassis_odom_tf_) {
+  if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
     odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>(
       chassis_odom_topic_, rclcpp::SystemDefaultsQoS());
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
     RCLCPP_INFO(
       get_logger(),
-      "Chassis DIY odom TF enabled: %s→%s topic=%s "
-      "(IMU yaw + cmd_vel vx integrate; drifts without localization)",
-      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str(),
-      chassis_odom_topic_.c_str());
+      "Chassis odom from wheel vel + IMU yaw (NOT cmd_vel): topic=%s "
+      "frames %s→%s wheel_r=%.4f m",
+      chassis_odom_topic_.c_str(), chassis_odom_parent_frame_.c_str(),
+      chassis_odom_child_frame_.c_str(), chassis_wheel_radius_m_);
+  }
+  if (enable_chassis_odom_tf_) {
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
+    RCLCPP_INFO(
+      get_logger(), "Chassis odom TF enabled: %s→%s",
+      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
   }
 }
 
@@ -458,10 +468,49 @@ void ArxLiftHardware::teardownChassisFeedbackPublishers()
   tf_broadcaster_.reset();
 }
 
-void ArxLiftHardware::updateChassisFeedbackAndOdom(
-  double dt_s, bool chassis_active)
+bool ArxLiftHardware::bodyTwistFromWheelVel(
+  const double wheel_vel[4], double & vx, double & vy, double & wz) const
 {
-  if (!lift_ || (!enable_chassis_feedback_ && !enable_chassis_odom_tf_)) {
+  // 3 omni: r*ω_i = -sin(θ)*vx + cos(θ)*vy + (x*cosθ + y*sinθ)*wz
+  // θ,x,y from Lift2S chassis.xacro; ω from SDK getWheelVel (rad/s).
+  if (!std::isfinite(chassis_wheel_radius_m_) || chassis_wheel_radius_m_ <= 0.0) {
+    return false;
+  }
+  Eigen::Matrix3d J;
+  Eigen::Vector3d w;
+  for (int i = 0; i < 3; ++i) {
+    if (!std::isfinite(wheel_vel[i])) {
+      return false;
+    }
+    const double th = wheel_yaw_[i];
+    const double s = std::sin(th);
+    const double c = std::cos(th);
+    J(i, 0) = -s;
+    J(i, 1) = c;
+    J(i, 2) = wheel_x_[i] * c + wheel_y_[i] * s;
+    w(i) = chassis_wheel_radius_m_ * wheel_vel[i];
+  }
+  Eigen::ColPivHouseholderQR<Eigen::Matrix3d> qr(J);
+  if (qr.rank() < 3) {
+    return false;
+  }
+  const Eigen::Vector3d twist = qr.solve(w);
+  if (!twist.allFinite()) {
+    return false;
+  }
+  vx = twist(0);
+  vy = twist(1);
+  wz = twist(2);
+  return true;
+}
+
+void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
+{
+  if (
+    !lift_ ||
+    (!enable_chassis_feedback_ && !enable_chassis_odom_ &&
+     !enable_chassis_odom_tf_))
+  {
     return;
   }
 
@@ -514,12 +563,24 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(
     }
   }
 
-  if (!enable_chassis_odom_tf_) {
+  if (!enable_chassis_odom_ && !enable_chassis_odom_tf_) {
     return;
   }
 
-  const double vx_cmd = chassis_active ? chassis_vx_.load() : 0.0;
-  const double wz_cmd = chassis_active ? chassis_wz_.load() : 0.0;
+  double vx_b = 0.0;
+  double vy_b = 0.0;
+  double wz_b = 0.0;
+  const bool twist_ok = bodyTwistFromWheelVel(wheel_vel, vx_b, vy_b, wz_b);
+  if (!twist_ok) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Chassis wheel forward kinematics failed; odom twist held at last pose");
+  } else {
+    // Prefer IMU yaw-rate when available; else kinematic wz.
+    if (std::isfinite(angular_vel[2])) {
+      wz_b = angular_vel[2];
+    }
+  }
 
   double x = 0.0;
   double y = 0.0;
@@ -543,10 +604,11 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(
     }
     odom_yaw_ = yaw;
 
-    // 差速 demo：只用 body vx（忽略 vy）；yaw 以 IMU 为准。
-    if (chassis_active && dt_s > 0.0 && std::isfinite(vx_cmd)) {
-      odom_x_ += vx_cmd * std::cos(yaw) * dt_s;
-      odom_y_ += vx_cmd * std::sin(yaw) * dt_s;
+    if (twist_ok && dt_s > 0.0) {
+      const double c = std::cos(yaw);
+      const double s = std::sin(yaw);
+      odom_x_ += (vx_b * c - vy_b * s) * dt_s;
+      odom_y_ += (vx_b * s + vy_b * c) * dt_s;
     }
     x = odom_x_;
     y = odom_y_;
@@ -555,7 +617,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(
   tf2::Quaternion q_yaw;
   q_yaw.setRPY(0.0, 0.0, yaw);
 
-  if (tf_broadcaster_) {
+  if (enable_chassis_odom_tf_ && tf_broadcaster_) {
     geometry_msgs::msg::TransformStamped tf_msg;
     tf_msg.header.stamp = stamp;
     tf_msg.header.frame_id = chassis_odom_parent_frame_;
@@ -582,9 +644,11 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(
     odom.pose.pose.orientation.y = q_yaw.y();
     odom.pose.pose.orientation.z = q_yaw.z();
     odom.pose.pose.orientation.w = q_yaw.w();
-    odom.twist.twist.linear.x = vx_cmd;
-    odom.twist.twist.angular.z =
-      chassis_active ? wz_cmd : angular_vel[2];
+    if (twist_ok) {
+      odom.twist.twist.linear.x = vx_b;
+      odom.twist.twist.linear.y = vy_b;
+      odom.twist.twist.angular.z = wz_b;
+    }
     odom_pub_->publish(odom);
   }
 }
@@ -935,11 +999,12 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // 官方 lift_controller 发 /arx_imu + 轮速；本 HI 再加差速自解算 TF（WBC world→base）。
+  // 官方无 odom：只发 IMU+轮速。本 HI 对齐 raw，另用轮速+IMU 自算 /arx_lift/odom。
   parse_bool_param(
     info_, "enable_chassis_feedback", true, enable_chassis_feedback_);
+  parse_bool_param(info_, "enable_chassis_odom", true, enable_chassis_odom_);
   parse_bool_param(
-    info_, "enable_chassis_odom_tf", true, enable_chassis_odom_tf_);
+    info_, "enable_chassis_odom_tf", false, enable_chassis_odom_tf_);
   chassis_odom_parent_frame_ =
     get_hw_param(info_, "chassis_odom_parent_frame", "world");
   chassis_odom_child_frame_ =
@@ -949,6 +1014,20 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     get_hw_param(info_, "chassis_wheel_vel_topic", "/arx_lift/wheel_vel");
   chassis_odom_topic_ =
     get_hw_param(info_, "chassis_odom_topic", "/arx_lift/odom");
+  if (!parse_double_param(
+      info_, "chassis_wheel_radius_m", 0.075, chassis_wheel_radius_m_,
+      get_logger()))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (
+    !std::isfinite(chassis_wheel_radius_m_) || chassis_wheel_radius_m_ <= 0.0)
+  {
+    RCLCPP_ERROR(
+      get_logger(), "chassis_wheel_radius_m must be finite and > 0 (got %.4f)",
+      chassis_wheel_radius_m_);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
   if (chassis_odom_parent_frame_.empty()) {
     chassis_odom_parent_frame_ = "world";
   }
@@ -985,7 +1064,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "ramp=%.3f m/s shutdown_return_home=%s height=%.3f "
     "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s "
     "chassis_max_vel=%.2f/%.2f/%.2f "
-    "chassis_feedback=%s odom_tf=%s (%s→%s)",
+    "chassis_feedback=%s odom=%s odom_tf=%s (%s→%s) wheel_r=%.4f",
     lift_joint_name_.c_str(), can_name_.c_str(), robot_type_,
     motor_mode_param_.c_str(), soft_p_kp_.load(), hybrid_kp_.load(),
     hybrid_kd_.load(), gravity_compensation_torque_.load(),
@@ -995,8 +1074,10 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_,
     chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_,
     enable_chassis_feedback_ ? "true" : "false",
+    enable_chassis_odom_ ? "true" : "false",
     enable_chassis_odom_tf_ ? "true" : "false",
-    chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
+    chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str(),
+    chassis_wheel_radius_m_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -1231,7 +1312,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
           lift_velocity_ = sdkToRos(-motor.velocity);
           lift_effort_ = motor.torque;
 
-          updateChassisFeedbackAndOdom(dt_s, chassis_active);
+          updateChassisFeedbackAndOdom(dt_s);
         } catch (const std::exception & e) {
           RCLCPP_ERROR_THROTTLE(
             get_logger(), *get_clock(), 1000,
