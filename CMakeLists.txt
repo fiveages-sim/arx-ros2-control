@@ -16,6 +16,10 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
@@ -118,6 +122,10 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
   rclcpp_lifecycle
   std_msgs
   geometry_msgs
+  sensor_msgs
+  nav_msgs
+  tf2
+  tf2_ros
 )
 
 # PRIVATE: HI is loaded via pluginlib; do not re-export SDK / joint .so into ament export.
@@ -225,6 +233,10 @@ ament_export_dependencies(
   rclcpp_lifecycle
   std_msgs
   geometry_msgs
+  sensor_msgs
+  nav_msgs
+  tf2
+  tf2_ros
 )
 
 ament_package()

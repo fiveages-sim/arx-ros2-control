@@ -80,10 +80,31 @@ soft_p：`loop()` 同时带升降+底盘；全身 OCS2 下易掉柱，仅适合 
 `chassis_max_vel_{x,y,z}` 须由 HI 写入（LIFTS 的 .so 未初始化）。  
 Lift2S xacro 默认开；若与 WBC 底盘规划抢指令可传 `enable_chassis_cmd_vel:=false`。
 
+### 底盘反馈 / 自解算 TF（WBC 全身链路 demo）
+
+对齐官方 [`LIFT` lift_controller](https://github.com/ARXroboticsX/LIFT)：SDK 有轮速+IMU，**无绝对 odom**。本 HI 补发布并做差速航迹推算，供 `ocs2_wbc_controller` 解锁底盘（查 `world→base_link`）。
+
+| hardware 参数 | 默认 | 说明 |
+|---------------|------|------|
+| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel` |
+| `enable_chassis_odom_tf` | `true` | 自解算 + TF + `/arx_lift/odom` |
+| `chassis_odom_parent_frame` | `world` | **须与 WBC `world_frame` 一致** |
+| `chassis_odom_child_frame` | `base_link` | **须与 task.info `baseFrame` 一致** |
+
+解算：**IMU yaw（相对启动零位）+ 已下发 `cmd_vel.linear.x` 积分**（差速 demo，忽略 `vy`）。无相机/雷达会漂，仅验证控制链路。
+
+```bash
+# 真机 activate 后
+ros2 topic echo /arx_imu --once
+ros2 topic echo /arx_lift/wheel_vel --once
+ros2 run tf2_ros tf2_echo world base_link
+# 手柄 CHASSIS 或 WBC BASE_UNLOCK 后，TF 平移/航向应变化
+```
+
 ## 依赖
 
 ### ROS2
-- `hardware_interface` / `pluginlib` / `rclcpp` / `rclcpp_lifecycle` / `std_msgs`
+- `hardware_interface` / `pluginlib` / `rclcpp` / `rclcpp_lifecycle` / `std_msgs` / `geometry_msgs` / `sensor_msgs` / `nav_msgs` / `tf2` / `tf2_ros`
 
 ### Vendored（`external/`）
 

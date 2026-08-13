@@ -22,6 +22,7 @@
  * - hybrid：直接跟 position + velocity；HI τ_ff（重力 + 库仑摩擦·(-sign(v_cmd))）；
  *   忽略控制器 effort（防 OCS2 RNEA 双重前馈）；增益来自 arx_lift.* 热调
  * - 可选底盘：vx/vy/wz → setChassisCmd + sendChassisOnly；升降 Hybrid 独立
+ * - 可选反馈：SDK IMU/轮速 → /arx_imu、/arx_lift/wheel_vel；差速积分 → TF world→base_link
  */
 
 #include "arx_ros2_control/arx_lift_hardware.h"
@@ -31,6 +32,9 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <stdexcept>
 #include <thread>
+
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2/LinearMath/Quaternion.h>
 
 namespace arx_ros2_control
 {
@@ -400,6 +404,191 @@ void ArxLiftHardware::flushChassisParkOnce()
   chassis_park_flushed_ = true;
 }
 
+void ArxLiftHardware::setupChassisFeedbackPublishers()
+{
+  teardownChassisFeedbackPublishers();
+  if (!enable_chassis_feedback_ && !enable_chassis_odom_tf_) {
+    return;
+  }
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Chassis feedback/odom enabled but no ROS node; publishers skipped");
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    odom_yaw_initialized_ = false;
+    odom_yaw0_ = 0.0;
+    odom_x_ = 0.0;
+    odom_y_ = 0.0;
+    odom_yaw_ = 0.0;
+  }
+
+  if (enable_chassis_feedback_) {
+    imu_pub_ = node->create_publisher<sensor_msgs::msg::Imu>(
+      chassis_imu_topic_, rclcpp::SystemDefaultsQoS());
+    wheel_vel_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
+      chassis_wheel_vel_topic_, rclcpp::SystemDefaultsQoS());
+    RCLCPP_INFO(
+      get_logger(),
+      "Chassis feedback enabled: imu=%s wheel_vel=%s (official SDK getters)",
+      chassis_imu_topic_.c_str(), chassis_wheel_vel_topic_.c_str());
+  }
+  if (enable_chassis_odom_tf_) {
+    odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>(
+      chassis_odom_topic_, rclcpp::SystemDefaultsQoS());
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
+    RCLCPP_INFO(
+      get_logger(),
+      "Chassis DIY odom TF enabled: %s→%s topic=%s "
+      "(IMU yaw + cmd_vel vx integrate; drifts without localization)",
+      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str(),
+      chassis_odom_topic_.c_str());
+  }
+}
+
+void ArxLiftHardware::teardownChassisFeedbackPublishers()
+{
+  imu_pub_.reset();
+  wheel_vel_pub_.reset();
+  odom_pub_.reset();
+  tf_broadcaster_.reset();
+}
+
+void ArxLiftHardware::updateChassisFeedbackAndOdom(
+  double dt_s, bool chassis_active)
+{
+  if (!lift_ || (!enable_chassis_feedback_ && !enable_chassis_odom_tf_)) {
+    return;
+  }
+
+  double wheel_vel[4] = {0.0, 0.0, 0.0, 0.0};
+  double orientation[3] = {0.0, 0.0, 0.0};
+  double angular_vel[3] = {0.0, 0.0, 0.0};
+  double accel[3] = {0.0, 0.0, 0.0};
+  try {
+    lift_->getWheelVel(wheel_vel);
+    lift_->getOrientation(orientation);
+    lift_->getAngularVel(angular_vel);
+    lift_->getAccel(accel);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Chassis SDK feedback read failed: %s", e.what());
+    return;
+  }
+
+  rclcpp::Time stamp;
+  try {
+    stamp = get_clock()->now();
+  } catch (...) {
+    stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+  }
+
+  if (enable_chassis_feedback_) {
+    if (imu_pub_) {
+      sensor_msgs::msg::Imu imu_msg;
+      imu_msg.header.stamp = stamp;
+      imu_msg.header.frame_id = chassis_odom_child_frame_;
+      tf2::Quaternion q;
+      q.setRPY(orientation[0], orientation[1], orientation[2]);
+      imu_msg.orientation.x = q.x();
+      imu_msg.orientation.y = q.y();
+      imu_msg.orientation.z = q.z();
+      imu_msg.orientation.w = q.w();
+      imu_msg.angular_velocity.x = angular_vel[0];
+      imu_msg.angular_velocity.y = angular_vel[1];
+      imu_msg.angular_velocity.z = angular_vel[2];
+      imu_msg.linear_acceleration.x = accel[0];
+      imu_msg.linear_acceleration.y = accel[1];
+      imu_msg.linear_acceleration.z = accel[2];
+      imu_pub_->publish(imu_msg);
+    }
+    if (wheel_vel_pub_) {
+      std_msgs::msg::Float64MultiArray wheels;
+      wheels.data = {wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]};
+      wheel_vel_pub_->publish(wheels);
+    }
+  }
+
+  if (!enable_chassis_odom_tf_) {
+    return;
+  }
+
+  const double vx_cmd = chassis_active ? chassis_vx_.load() : 0.0;
+  const double wz_cmd = chassis_active ? chassis_wz_.load() : 0.0;
+
+  double x = 0.0;
+  double y = 0.0;
+  double yaw = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    if (!odom_yaw_initialized_) {
+      odom_yaw0_ = orientation[2];
+      odom_yaw_initialized_ = true;
+      odom_x_ = 0.0;
+      odom_y_ = 0.0;
+      odom_yaw_ = 0.0;
+    }
+
+    yaw = orientation[2] - odom_yaw0_;
+    while (yaw > M_PI) {
+      yaw -= 2.0 * M_PI;
+    }
+    while (yaw < -M_PI) {
+      yaw += 2.0 * M_PI;
+    }
+    odom_yaw_ = yaw;
+
+    // 差速 demo：只用 body vx（忽略 vy）；yaw 以 IMU 为准。
+    if (chassis_active && dt_s > 0.0 && std::isfinite(vx_cmd)) {
+      odom_x_ += vx_cmd * std::cos(yaw) * dt_s;
+      odom_y_ += vx_cmd * std::sin(yaw) * dt_s;
+    }
+    x = odom_x_;
+    y = odom_y_;
+  }
+
+  tf2::Quaternion q_yaw;
+  q_yaw.setRPY(0.0, 0.0, yaw);
+
+  if (tf_broadcaster_) {
+    geometry_msgs::msg::TransformStamped tf_msg;
+    tf_msg.header.stamp = stamp;
+    tf_msg.header.frame_id = chassis_odom_parent_frame_;
+    tf_msg.child_frame_id = chassis_odom_child_frame_;
+    tf_msg.transform.translation.x = x;
+    tf_msg.transform.translation.y = y;
+    tf_msg.transform.translation.z = 0.0;
+    tf_msg.transform.rotation.x = q_yaw.x();
+    tf_msg.transform.rotation.y = q_yaw.y();
+    tf_msg.transform.rotation.z = q_yaw.z();
+    tf_msg.transform.rotation.w = q_yaw.w();
+    tf_broadcaster_->sendTransform(tf_msg);
+  }
+
+  if (odom_pub_) {
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = stamp;
+    odom.header.frame_id = chassis_odom_parent_frame_;
+    odom.child_frame_id = chassis_odom_child_frame_;
+    odom.pose.pose.position.x = x;
+    odom.pose.pose.position.y = y;
+    odom.pose.pose.position.z = 0.0;
+    odom.pose.pose.orientation.x = q_yaw.x();
+    odom.pose.pose.orientation.y = q_yaw.y();
+    odom.pose.pose.orientation.z = q_yaw.z();
+    odom.pose.pose.orientation.w = q_yaw.w();
+    odom.twist.twist.linear.x = vx_cmd;
+    odom.twist.twist.angular.z =
+      chassis_active ? wz_cmd : angular_vel[2];
+    odom_pub_->publish(odom);
+  }
+}
+
 void ArxLiftHardware::setupChassisCmdVelSubscription()
 {
   teardownChassisCmdVelSubscription();
@@ -746,6 +935,36 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  // 官方 lift_controller 发 /arx_imu + 轮速；本 HI 再加差速自解算 TF（WBC world→base）。
+  parse_bool_param(
+    info_, "enable_chassis_feedback", true, enable_chassis_feedback_);
+  parse_bool_param(
+    info_, "enable_chassis_odom_tf", true, enable_chassis_odom_tf_);
+  chassis_odom_parent_frame_ =
+    get_hw_param(info_, "chassis_odom_parent_frame", "world");
+  chassis_odom_child_frame_ =
+    get_hw_param(info_, "chassis_odom_child_frame", "base_link");
+  chassis_imu_topic_ = get_hw_param(info_, "chassis_imu_topic", "/arx_imu");
+  chassis_wheel_vel_topic_ =
+    get_hw_param(info_, "chassis_wheel_vel_topic", "/arx_lift/wheel_vel");
+  chassis_odom_topic_ =
+    get_hw_param(info_, "chassis_odom_topic", "/arx_lift/odom");
+  if (chassis_odom_parent_frame_.empty()) {
+    chassis_odom_parent_frame_ = "world";
+  }
+  if (chassis_odom_child_frame_.empty()) {
+    chassis_odom_child_frame_ = "base_link";
+  }
+  if (chassis_imu_topic_.empty()) {
+    chassis_imu_topic_ = "/arx_imu";
+  }
+  if (chassis_wheel_vel_topic_.empty()) {
+    chassis_wheel_vel_topic_ = "/arx_lift/wheel_vel";
+  }
+  if (chassis_odom_topic_.empty()) {
+    chassis_odom_topic_ = "/arx_lift/odom";
+  }
+
   lift_position_ = 0.0;
   lift_velocity_ = 0.0;
   lift_effort_ = 0.0;
@@ -765,7 +984,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "gravity=%.3f coulomb_friction=%.3f friction_vel_eps=%.4f m/s "
     "ramp=%.3f m/s shutdown_return_home=%s height=%.3f "
     "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s "
-    "chassis_max_vel=%.2f/%.2f/%.2f",
+    "chassis_max_vel=%.2f/%.2f/%.2f "
+    "chassis_feedback=%s odom_tf=%s (%s→%s)",
     lift_joint_name_.c_str(), can_name_.c_str(), robot_type_,
     motor_mode_param_.c_str(), soft_p_kp_.load(), hybrid_kp_.load(),
     hybrid_kd_.load(), gravity_compensation_torque_.load(),
@@ -773,7 +993,10 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     cmd_ramp_vel_mps_, shutdown_return_home_ ? "true" : "false",
     shutdown_height_m_, enable_chassis_cmd_vel_ ? "true" : "false",
     chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_,
-    chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_);
+    chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_,
+    enable_chassis_feedback_ ? "true" : "false",
+    enable_chassis_odom_tf_ ? "true" : "false",
+    chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -861,6 +1084,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
       status_debug_.load());
 
     setupChassisCmdVelSubscription();
+    setupChassisFeedbackPublishers();
 
     if (auto node = get_node()) {
       motor_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -898,6 +1122,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
             dt_s = 0.05;
           }
 
+          bool chassis_active = false;
           if (soft_stop_active_.load()) {
             // Soft stop at height: keep gravity τ_ff (τ=0 while elevated buzzes/drops).
             applyChassisCmd(/*force_park=*/true);
@@ -937,7 +1162,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
             ramp_initialized_ = false;
             last_applied_mode_ = -1;
           } else {
-            const bool chassis_active = applyChassisCmd(/*force_park=*/false);
+            chassis_active = applyChassisCmd(/*force_park=*/false);
             const double q_target = rosToSdk(lift_position_command_);
             if (!ramp_initialized_) {
               ramp_q_sdk_ = sdk_get_height_.load();
@@ -1005,6 +1230,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
           lift_position_ = sdkToRos(sdk_h);
           lift_velocity_ = sdkToRos(-motor.velocity);
           lift_effort_ = motor.torque;
+
+          updateChassisFeedbackAndOdom(dt_s, chassis_active);
         } catch (const std::exception & e) {
           RCLCPP_ERROR_THROTTLE(
             get_logger(), *get_clock(), 1000,
@@ -1041,6 +1268,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
     RCLCPP_ERROR(get_logger(), "Failed to activate ArxLiftHardware: %s", e.what());
     stop_loop_thread();
     teardownChassisCmdVelSubscription();
+    teardownChassisFeedbackPublishers();
     param_cb_.reset();
     lift_.reset();
     return hardware_interface::CallbackReturn::ERROR;
@@ -1056,6 +1284,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_deactivate(
   RCLCPP_INFO(get_logger(), "ArxLiftHardware on_deactivate: enterSafeExit");
   enterSafeExit(/*allow_return_home=*/true);
   teardownChassisCmdVelSubscription();
+  teardownChassisFeedbackPublishers();
   param_cb_.reset();
   motor_pub_.reset();
   RCLCPP_INFO(get_logger(), "ArxLiftHardware deactivated");
@@ -1071,6 +1300,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_shutdown(
   RCLCPP_INFO(get_logger(), "ArxLiftHardware on_shutdown: enterSafeExit");
   enterSafeExit(/*allow_return_home=*/true);
   teardownChassisCmdVelSubscription();
+  teardownChassisFeedbackPublishers();
   param_cb_.reset();
   motor_pub_.reset();
   RCLCPP_INFO(
@@ -1088,6 +1318,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_error(
   RCLCPP_ERROR(get_logger(), "ArxLiftHardware on_error: soft stop only");
   enterSafeExit(/*allow_return_home=*/false);
   teardownChassisCmdVelSubscription();
+  teardownChassisFeedbackPublishers();
   param_cb_.reset();
   motor_pub_.reset();
   return hardware_interface::CallbackReturn::SUCCESS;

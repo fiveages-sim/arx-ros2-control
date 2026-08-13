@@ -20,7 +20,10 @@
 #include <rclcpp_lifecycle/state.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include "arx_lift_src/lift_head_control_loop.h"
 
@@ -28,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,6 +54,13 @@ namespace arx_ros2_control
  * - hybrid：升降 sendLiftHybrid；底盘 vx/vy/wz 走 sendChassisOnly（不绑 Soft-P）
  * - soft_p：loop()（含底盘）；OCS2 全身请用 hybrid
  * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
+ *
+ * 底盘反馈 / 自解算 TF（可选，对齐官方 lift_controller + WBC）：
+ * - ``enable_chassis_feedback``：``getOrientation/AngularVel/Accel`` → ``/arx_imu``；
+ *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
+ * - ``enable_chassis_odom_tf``：差速航迹推算（IMU yaw + 已下发 ``vx`` 积分）→
+ *   TF ``world→base_link``（WBC ``world_frame``/``baseFrame``）及 ``/arx_lift/odom``
+ * - 无外部定位会漂；仅用于验证全身底盘控制链路
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -115,6 +126,15 @@ private:
   void flushChassisCanOnly();
   /** Hybrid 停车：最多刷一次 mode=2 底盘帧。 */
   void flushChassisParkOnce();
+
+  /** 创建 IMU / 轮速 / odom / TF 发布者（activate）。 */
+  void setupChassisFeedbackPublishers();
+  void teardownChassisFeedbackPublishers();
+  /**
+   * 读 SDK 底盘反馈；可选发布 IMU/轮速；可选差速积分并发 world→base_link。
+   * @param dt_s 本周期时长；@param chassis_active 是否 mode=1 在跑。
+   */
+  void updateChassisFeedbackAndOdom(double dt_s, bool chassis_active);
 
   double rosToSdk(double ros_m) const
   {
@@ -194,6 +214,28 @@ private:
   /** Hybrid 下 mode=2 停车帧是否已刷过。 */
   bool chassis_park_flushed_{false};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
+
+  /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选自解算 TF。 */
+  bool enable_chassis_feedback_{true};
+  bool enable_chassis_odom_tf_{true};
+  std::string chassis_odom_parent_frame_{"world"};
+  std::string chassis_odom_child_frame_{"base_link"};
+  std::string chassis_imu_topic_{"/arx_imu"};
+  std::string chassis_wheel_vel_topic_{"/arx_lift/wheel_vel"};
+  std::string chassis_odom_topic_{"/arx_lift/odom"};
+
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_vel_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+  /** 差速航迹：IMU yaw 相对零位 + 已下发 vx 积分（无相机雷达，会漂）。 */
+  std::mutex odom_mutex_;
+  bool odom_yaw_initialized_{false};
+  double odom_yaw0_{0.0};
+  double odom_x_{0.0};
+  double odom_y_{0.0};
+  double odom_yaw_{0.0};
 
   std::atomic<double> motor_position_{0.0};
   std::atomic<double> motor_velocity_{0.0};
