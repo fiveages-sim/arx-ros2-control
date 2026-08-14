@@ -39,7 +39,8 @@ namespace arx_ros2_control
  * @brief Lift2S 升降柱 ros2_control 硬件接口。
  *
  * ``lift_motor_mode``（运行时可改 ``arx_lift.motor_mode``）：
- * - ``soft_p`` / ``position`` — Soft-P ``setHeight`` / ``loop()``，仅跟踪 position（功能保留）
+ * - ``soft_p`` / ``position`` — 仅跟踪 position（直跟，无 HI 斜坡）；
+ *   Type3 位置环 + **常值**重力 ``τ_g``（不加库仑摩擦）；不走 SDK ``loop()`` 混发底盘
  * - ``hybrid``（默认）— ``sendLiftHybrid``；跟踪 position+velocity；
  *   kp/kd = ``arx_lift.hybrid_kp/kd``；
  *   ``τ_ff = gravity - coulomb * sign(v_cmd)``（忽略上层 effort）
@@ -47,8 +48,7 @@ namespace arx_ros2_control
  * 底盘（可选，URDF ``enable_chassis_cmd_vel``）：
  * - 订阅 ``chassis_cmd_vel_topic``（默认 ``/cmd_vel``）→ ``setChassisCmd``
  * - Twist ``vx/vy/wz`` 原样（对齐 body_communicator；勿套 PosCmd ``-chy``）
- * - hybrid：升降 sendLiftHybrid；底盘 vx/vy/wz 走 sendChassisOnly（不绑 Soft-P）
- * - soft_p：loop()（含底盘）；OCS2 全身请用 hybrid
+ * - 两种模式：升降与底盘分开发；底盘 ``sendChassisOnly``（0x701/0x703）
  * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
@@ -102,8 +102,11 @@ private:
     double friction_vel_eps_mps, bool status_debug);
   double computeHybridFeedforward(double v_cmd_sdk) const;
   /** @param chassis_active 本周期底盘是否 mode=1。 */
+  void flushChassisForControlCycle(bool chassis_active);
   void sendHybridHoldOrTrack(
     double q_target_sdk, double dt_s, bool chassis_active);
+  /** Soft-P：直跟 SDK 高度目标；忽略上层 vel/effort。 */
+  void sendSoftPHoldOrTrack(double q_sdk, bool chassis_active);
   void enterSafeExit(bool allow_return_home);
   void interpolateLiftToShutdownHeight();
   void softStopLift();
@@ -111,9 +114,9 @@ private:
   void teardownChassisCmdVelSubscription();
   /** @return true 若底盘为运行 mode=1（有有效 cmd_vel）。 */
   bool applyChassisCmd(bool force_park);
-  /** Hybrid 路径：只发 0x701/0x703（不 Soft-P 升降）。 */
+  /** 只发 0x701/0x703（不发升降）。 */
   void flushChassisCanOnly();
-  /** Hybrid 停车：最多刷一次 mode=2 底盘帧。 */
+  /** 停车：最多刷一次 mode=2 底盘帧。 */
   void flushChassisParkOnce();
 
   double rosToSdk(double ros_m) const
