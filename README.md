@@ -95,7 +95,7 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 |---------------|------|------|
 | `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel` |
 | `enable_chassis_odom` | `true` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
-| `enable_chassis_odom_tf` | `true` | 广播 `world→base_link`（OCS2 WBC） |
+| `enable_chassis_odom_tf` | `true` | 持续广播 `world→base_link`（activate 起即发；SDK 失败 hold last pose）。WBC 探测到外部 TF 后**不再**发 identity 占位 TF |
 | `enable_chassis_odom_debug` | `true` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
 | `chassis_odom_parent_frame` | `world` | odom/`TF` 父系 |
 | `chassis_odom_child_frame` | `base_link` | 子系（Lift2S URDF root） |

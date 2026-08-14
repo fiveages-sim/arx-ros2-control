@@ -494,7 +494,8 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
   if (enable_chassis_odom_tf_) {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
     RCLCPP_INFO(
-      get_logger(), "Chassis odom TF enabled: %s→%s",
+      get_logger(),
+      "Chassis odom TF enabled: %s→%s (continuous; replaces WBC identity placeholder)",
       chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
   }
   if (enable_chassis_odom_debug_) {
@@ -506,6 +507,17 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
       "Chassis odom debug: cmd_vel→expected wheel ω on %s (compare with %s)",
       chassis_wheel_vel_expected_topic_.c_str(),
       chassis_wheel_vel_topic_.c_str());
+  }
+
+  // Activate 立刻发一帧 identity，保证 WBC 探测窗内能看到外部 TF，从而跳过占位 TF。
+  if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
+    rclcpp::Time stamp;
+    try {
+      stamp = get_clock()->now();
+    } catch (...) {
+      stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+    }
+    publishChassisOdomAndTf(stamp, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
   }
 }
 
@@ -625,6 +637,49 @@ bool ArxLiftHardware::bodyTwistFromWheelVel(
   return true;
 }
 
+void ArxLiftHardware::publishChassisOdomAndTf(
+  const rclcpp::Time & stamp, double x, double y, double yaw, double vx_b,
+  double vy_b, double wz_b, bool twist_ok)
+{
+  tf2::Quaternion q_yaw;
+  q_yaw.setRPY(0.0, 0.0, yaw);
+
+  if (enable_chassis_odom_tf_ && tf_broadcaster_) {
+    geometry_msgs::msg::TransformStamped tf_msg;
+    tf_msg.header.stamp = stamp;
+    tf_msg.header.frame_id = chassis_odom_parent_frame_;
+    tf_msg.child_frame_id = chassis_odom_child_frame_;
+    tf_msg.transform.translation.x = x;
+    tf_msg.transform.translation.y = y;
+    tf_msg.transform.translation.z = 0.0;
+    tf_msg.transform.rotation.x = q_yaw.x();
+    tf_msg.transform.rotation.y = q_yaw.y();
+    tf_msg.transform.rotation.z = q_yaw.z();
+    tf_msg.transform.rotation.w = q_yaw.w();
+    tf_broadcaster_->sendTransform(tf_msg);
+  }
+
+  if (odom_pub_) {
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = stamp;
+    odom.header.frame_id = chassis_odom_parent_frame_;
+    odom.child_frame_id = chassis_odom_child_frame_;
+    odom.pose.pose.position.x = x;
+    odom.pose.pose.position.y = y;
+    odom.pose.pose.position.z = 0.0;
+    odom.pose.pose.orientation.x = q_yaw.x();
+    odom.pose.pose.orientation.y = q_yaw.y();
+    odom.pose.pose.orientation.z = q_yaw.z();
+    odom.pose.pose.orientation.w = q_yaw.w();
+    if (twist_ok) {
+      odom.twist.twist.linear.x = vx_b;
+      odom.twist.twist.linear.y = vy_b;
+      odom.twist.twist.angular.z = wz_b;
+    }
+    odom_pub_->publish(odom);
+  }
+}
+
 void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
 {
   if (
@@ -635,27 +690,46 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     return;
   }
 
-  double wheel_vel[4] = {0.0, 0.0, 0.0, 0.0};
-  double orientation[3] = {0.0, 0.0, 0.0};
-  double angular_vel[3] = {0.0, 0.0, 0.0};
-  double accel[3] = {0.0, 0.0, 0.0};
-  try {
-    lift_->getWheelVel(wheel_vel);
-    lift_->getOrientation(orientation);
-    lift_->getAngularVel(angular_vel);
-    lift_->getAccel(accel);
-  } catch (const std::exception & e) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000,
-      "Chassis SDK feedback read failed: %s", e.what());
-    return;
-  }
-
   rclcpp::Time stamp;
   try {
     stamp = get_clock()->now();
   } catch (...) {
     stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+  }
+
+  double wheel_vel[4] = {0.0, 0.0, 0.0, 0.0};
+  double orientation[3] = {0.0, 0.0, 0.0};
+  double angular_vel[3] = {0.0, 0.0, 0.0};
+  double accel[3] = {0.0, 0.0, 0.0};
+  bool sdk_ok = false;
+  try {
+    lift_->getWheelVel(wheel_vel);
+    lift_->getOrientation(orientation);
+    lift_->getAngularVel(angular_vel);
+    lift_->getAccel(accel);
+    sdk_ok = true;
+  } catch (const std::exception & e) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Chassis SDK feedback read failed: %s (holding last odom/TF)", e.what());
+  }
+
+  // SDK 失败时仍刷新 world→base_link，避免 RViz Fixed Frame=world 断桥，
+  // 也避免 WBC 因短暂缺 TF 回退到 identity 占位。
+  if (!sdk_ok) {
+    if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
+      double x = 0.0;
+      double y = 0.0;
+      double yaw = 0.0;
+      {
+        std::lock_guard<std::mutex> lock(odom_mutex_);
+        x = odom_x_;
+        y = odom_y_;
+        yaw = odom_yaw_;
+      }
+      publishChassisOdomAndTf(stamp, x, y, yaw, 0.0, 0.0, 0.0, false);
+    }
+    return;
   }
 
   if (enable_chassis_feedback_) {
@@ -747,43 +821,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     y = odom_y_;
   }
 
-  tf2::Quaternion q_yaw;
-  q_yaw.setRPY(0.0, 0.0, yaw);
-
-  if (enable_chassis_odom_tf_ && tf_broadcaster_) {
-    geometry_msgs::msg::TransformStamped tf_msg;
-    tf_msg.header.stamp = stamp;
-    tf_msg.header.frame_id = chassis_odom_parent_frame_;
-    tf_msg.child_frame_id = chassis_odom_child_frame_;
-    tf_msg.transform.translation.x = x;
-    tf_msg.transform.translation.y = y;
-    tf_msg.transform.translation.z = 0.0;
-    tf_msg.transform.rotation.x = q_yaw.x();
-    tf_msg.transform.rotation.y = q_yaw.y();
-    tf_msg.transform.rotation.z = q_yaw.z();
-    tf_msg.transform.rotation.w = q_yaw.w();
-    tf_broadcaster_->sendTransform(tf_msg);
-  }
-
-  if (odom_pub_) {
-    nav_msgs::msg::Odometry odom;
-    odom.header.stamp = stamp;
-    odom.header.frame_id = chassis_odom_parent_frame_;
-    odom.child_frame_id = chassis_odom_child_frame_;
-    odom.pose.pose.position.x = x;
-    odom.pose.pose.position.y = y;
-    odom.pose.pose.position.z = 0.0;
-    odom.pose.pose.orientation.x = q_yaw.x();
-    odom.pose.pose.orientation.y = q_yaw.y();
-    odom.pose.pose.orientation.z = q_yaw.z();
-    odom.pose.pose.orientation.w = q_yaw.w();
-    if (twist_ok) {
-      odom.twist.twist.linear.x = vx_b;
-      odom.twist.twist.linear.y = vy_b;
-      odom.twist.twist.angular.z = wz_b;
-    }
-    odom_pub_->publish(odom);
-  }
+  publishChassisOdomAndTf(stamp, x, y, yaw, vx_b, vy_b, wz_b, twist_ok);
 }
 
 void ArxLiftHardware::setupChassisCmdVelSubscription()

@@ -63,7 +63,8 @@ namespace arx_ros2_control
  *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
  * - ``enable_chassis_odom``：用 **轮速逆解（Isaac Holonomic 正向之逆）+ IMU yaw**
  *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分）
- * - ``enable_chassis_odom_tf``：广播 ``world→base_link``（默认开，供 OCS2 WBC）
+ * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（默认开；activate 起即发，
+ *   SDK 失败时 hold last pose，让 WBC 跳过 identity 占位 TF）
  * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速，便于真机对比
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
@@ -136,9 +137,17 @@ private:
   void teardownChassisFeedbackPublishers();
   /**
    * 读 SDK 底盘反馈；发布 IMU/轮速；可选由轮速+IMU 积分解算里程计。
+   * SDK 读失败时仍发布上次位姿的 odom/TF，避免 world→base_link 断桥。
    * @param dt_s 本周期时长。
    */
   void updateChassisFeedbackAndOdom(double dt_s);
+  /**
+   * 发布当前 odom 位姿到 ``/arx_lift/odom`` 与（可选）``world→base_link`` TF。
+   * @param twist_ok 本拍是否有有效 body twist（写入 odom.twist）。
+   */
+  void publishChassisOdomAndTf(
+    const rclcpp::Time & stamp, double x, double y, double yaw, double vx_b,
+    double vy_b, double wz_b, bool twist_ok);
   /** 按 Lift2S / Isaac Holonomic（mecanum=90°）几何预计算 3×3 雅可比。 */
   bool buildChassisKinematics();
   /**
