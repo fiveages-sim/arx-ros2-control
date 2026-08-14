@@ -82,29 +82,34 @@ Lift2S xacro 默认开；若与 WBC 底盘规划抢指令可传 `enable_chassis_
 
 ### 底盘反馈 / 自解算里程计（对齐官方 raw，无官方 odom）
 
-官方 [`LIFT` lift_controller](https://github.com/ARXroboticsX/LIFT) / 你本地的 `ARX_GIT/LIFT`：**不发布** `nav_msgs/Odometry` / 底盘 TF，只发：
+官方 [`LIFT` lift_controller](https://github.com/ARXroboticsX/LIFT) / 本地 `ARX_GIT/LIFT`：**不发布** `nav_msgs/Odometry` / 底盘 TF，只发：
 
 - `/arx_imu`（`getOrientation` + `getAngularVel` + `getAccel`）
 - `/body_information` 里塞 `getWheelVel`（rad/s）
 
-本 HI 对齐该 raw 接口，并**额外**用轮速正运动学 + IMU yaw 做底层里程计（**不用** `cmd_vel` 积分）。
+MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_vel` 积分，而是用反馈轮速做 **Isaac Holonomic（mecanum=90°）正向之逆**，再叠 IMU yaw 积分。
+
+几何默认对齐 `arx_lift2s` `chassis.xacro` / FaSim `ARX_LIFT2S`（`r=0.075`，三轮 xyz/yaw，`isaacmecanumwheel:angle=90`）。
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel`（官方式） |
-| `enable_chassis_odom` | `true` | 轮速 FK + IMU yaw → `/arx_lift/odom` |
-| `enable_chassis_odom_tf` | `false` | 额外广播 `world→base_link`（WBC 用时再开） |
+| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel` |
+| `enable_chassis_odom` | `true` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
+| `enable_chassis_odom_tf` | `true` | 广播 `world→base_link`（OCS2 WBC） |
+| `enable_chassis_odom_debug` | `true` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
 | `chassis_odom_parent_frame` | `world` | odom/`TF` 父系 |
 | `chassis_odom_child_frame` | `base_link` | 子系（Lift2S URDF root） |
-| `chassis_wheel_radius_m` | `0.075` | Omnia150 默认半径；可标定 |
+| `chassis_wheel_radius_m` | `0.075` | Omnia150；可标定 |
+| `chassis_wheel_vel_sign` | `1 1 1` | 若实测与期望反号，逐轮改为 `-1` |
 
-解算：三全向轮几何取自 `arx_lift2s` `chassis.xacro`（轮心 xyz + joint yaw）；  
-`r·ω = J · [vx,vy,wz]`，积分用 IMU yaw + body `(vx,vy)`。无外部定位仍会漂。
+解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；位姿用 IMU yaw + body `(vx,vy)` 积分。无外部定位仍会漂。
 
 ```bash
 ros2 topic echo /arx_imu --once
 ros2 topic echo /arx_lift/wheel_vel --once
+ros2 topic echo /arx_lift/wheel_vel_expected --once
 ros2 topic echo /arx_lift/odom --once
+ros2 run tf2_ros tf2_echo world base_link
 ```
 
 ## 依赖

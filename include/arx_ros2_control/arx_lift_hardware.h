@@ -27,6 +27,8 @@
 
 #include "arx_lift_src/lift_head_control_loop.h"
 
+#include <Eigen/Dense>
+
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -59,9 +61,10 @@ namespace arx_ros2_control
  * - ``enable_chassis_feedback``：对齐官方 lift_controller —
  *   ``getOrientation/AngularVel/Accel`` → ``/arx_imu``；
  *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
- * - ``enable_chassis_odom``：用 **轮速正运动学 + IMU yaw** 积分发 ``/arx_lift/odom``
- *   （**不用** ``cmd_vel``；几何默认取 Lift2S 三全向轮 URDF）
- * - ``enable_chassis_odom_tf``：额外广播 ``world→base_link``（可选，默认关）
+ * - ``enable_chassis_odom``：用 **轮速逆解（Isaac Holonomic 正向之逆）+ IMU yaw**
+ *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分）
+ * - ``enable_chassis_odom_tf``：广播 ``world→base_link``（默认开，供 OCS2 WBC）
+ * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速，便于真机对比
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -136,12 +139,17 @@ private:
    * @param dt_s 本周期时长。
    */
   void updateChassisFeedbackAndOdom(double dt_s);
+  /** 按 Lift2S / Isaac Holonomic（mecanum=90°）几何预计算 3×3 雅可比。 */
+  bool buildChassisKinematics();
   /**
-   * Lift2S 三全向轮正运动学：ω[rad/s] → body (vx,vy,wz)。
-   * @return false 若几何奇异或输入非有限。
+   * 逆解：ω[rad/s] → body (vx,vy,wz)。对齐 Isaac HolonomicController 正向的逆。
+   * @return false 若几何未就绪或输入非有限。
    */
   bool bodyTwistFromWheelVel(
     const double wheel_vel[4], double & vx, double & vy, double & wz) const;
+  /** 正解：body twist → 期望轮速 ω[rad/s]（与 Isaac cmd_vel→wheel 同模型）。 */
+  bool wheelVelFromBodyTwist(
+    double vx, double vy, double wz, double wheel_out[3]) const;
 
   double rosToSdk(double ros_m) const
   {
@@ -225,25 +233,39 @@ private:
   /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选轮速+IMU 里程计。 */
   bool enable_chassis_feedback_{true};
   bool enable_chassis_odom_{true};
-  bool enable_chassis_odom_tf_{false};
+  bool enable_chassis_odom_tf_{true};
+  bool enable_chassis_odom_debug_{true};
   std::string chassis_odom_parent_frame_{"world"};
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};
   std::string chassis_wheel_vel_topic_{"/arx_lift/wheel_vel"};
+  std::string chassis_wheel_vel_expected_topic_{"/arx_lift/wheel_vel_expected"};
   std::string chassis_odom_topic_{"/arx_lift/odom"};
 
-  /** Lift2S 三全向轮（chassis.xacro）；Omnia150 默认半径 0.075 m。 */
+  /**
+   * Lift2S 三全向轮几何（chassis.xacro / FaSim ARX_LIFT2S.usda）：
+   * Omnia150 r=0.075；mecanumAngles=90° → 驱动方向 = R_z(θ)·Ŷ。
+   * 与 Isaac HolonomicController 正向模型一致，此处做逆解。
+   */
   double chassis_wheel_radius_m_{0.075};
+  double chassis_mecanum_angle_deg_{90.0};
   double wheel_x_[3]{0.15361, 0.15361, -0.35293};
   double wheel_y_[3]{0.29246, -0.29245, 0.0};
   double wheel_yaw_[3]{1.0472, -1.0472, 3.1415};
+  double wheel_vel_sign_[3]{1.0, 1.0, 1.0};
+  bool chassis_kinematics_ok_{false};
+  /** r*ω = J_rw_from_body_ * [vx,vy,wz]；body = J_body_from_rw_ * (r*ω)。 */
+  Eigen::Matrix3d J_rw_from_body_{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d J_body_from_rw_{Eigen::Matrix3d::Zero()};
 
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_vel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+    wheel_vel_expected_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-  /** 航迹：IMU yaw 相对零位 + 轮速正运动学得到的 body vx/vy 积分。 */
+  /** 航迹：IMU yaw 相对零位 + 轮速逆解得到的 body vx/vy 积分。 */
   std::mutex odom_mutex_;
   bool odom_yaw_initialized_{false};
   double odom_yaw0_{0.0};
