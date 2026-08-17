@@ -239,6 +239,8 @@ private:
   std::atomic<int64_t> chassis_cmd_stamp_ns_{0};
   /** Hybrid 下 mode=2 停车帧是否已刷过。 */
   bool chassis_park_flushed_{false};
+  /** 最近下发的底盘 mode：1=运行，2=停车（官方：运动控制启动后才有轮速反馈）。 */
+  std::atomic<int> chassis_mode_cmd_{2};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
 
   /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选轮速+IMU 里程计。 */
@@ -250,6 +252,8 @@ private:
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};
   std::string chassis_wheel_vel_topic_{"/arx_lift/wheel_vel"};
+  /** 对齐官方 /body_information.temp_float_data：[0]=腰占位，[1..4]=轮速。 */
+  std::string chassis_body_temp_float_topic_{"/arx_lift/body_temp_float_data"};
   std::string chassis_wheel_vel_expected_topic_{"/arx_lift/wheel_vel_expected"};
   std::string chassis_odom_topic_{"/arx_lift/odom"};
 
@@ -271,6 +275,9 @@ private:
 
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_vel_pub_;
+  /** 官方文档同布局：temp_float_data[1..3]=LIFT 三轮（[4] 常 0）。 */
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+    body_temp_float_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
     wheel_vel_expected_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;

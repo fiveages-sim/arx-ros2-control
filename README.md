@@ -105,9 +105,14 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；位姿用 IMU yaw + body `(vx,vy)` 积分。无外部定位仍会漂。
 
 ```bash
-# 先测反馈（默认）
+# 先测反馈（默认）。官方文档：须先启动底盘运动控制（mode=1）再看轮速。
 ros2 topic echo /arx_imu
 ros2 topic echo /arx_lift/wheel_vel
+# 对齐官方 /body_information.temp_float_data：data[1..3]=LIFT 三轮
+ros2 topic echo /arx_lift/body_temp_float_data
+# 开底盘后再看轮速 / CAN 0x702：
+# ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}" -r 20
+# timeout 5 candump can5,702:7FF
 # 后续再开 odom/TF 时：
 # ros2 topic echo /arx_lift/odom
 # ros2 run tf2_ros tf2_echo world base_link
