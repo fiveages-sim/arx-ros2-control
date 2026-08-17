@@ -107,6 +107,10 @@ endif()
 set(ARX_HI_SOURCES src/arx_x5_hardware.cpp)
 if(ARX_HAS_LIFT)
   list(APPEND ARX_HI_SOURCES src/arx_lift_hardware.cpp)
+  # Eigen QR/solve triggers -Wmaybe-uninitialized noise in TriangularMatrixVector.h
+  # (false positive on system Eigen); keep colcon/quick_start stderr clean.
+  set_source_files_properties(src/arx_lift_hardware.cpp PROPERTIES
+    COMPILE_FLAGS "-Wno-maybe-uninitialized")
 endif()
 
 add_library(${PROJECT_NAME} SHARED ${ARX_HI_SOURCES})

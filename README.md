@@ -93,29 +93,28 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_feedback` | `true` | `/arx_imu`（CAN `0x706/707/708`）+ `/arx_lift/wheel_vel`（CAN **`0x702`**；Lift2S 现场可能无此帧→恒为 0） |
-| `enable_chassis_odom` | `false` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
-| `enable_chassis_odom_tf` | `false` | 广播 `world→base_link`；默认关，全身 RViz 用 WBC identity 占位 TF |
-| `enable_chassis_odom_debug` | `false` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
+| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel` + `/body_information`（CAN `0x702`） |
+| `enable_chassis_odom` | `true`（Lift2S xacro） | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
+| `enable_chassis_odom_tf` | `true`（Lift2S xacro） | 广播 `world→base_link`；关则 WBC 发 identity 占位 |
+| `enable_chassis_odom_debug` | `true` | `/arx_lift/wheel_vel_expected`（cmd_vel 正解，不参与积分） |
 | `chassis_odom_parent_frame` | `world` | odom/`TF` 父系 |
 | `chassis_odom_child_frame` | `base_link` | 子系（Lift2S URDF root） |
 | `chassis_wheel_radius_m` | `0.075` | Omnia150；可标定 |
 | `chassis_wheel_vel_sign` | `1 1 1` | 若实测与期望反号，逐轮改为 `-1` |
+| `chassis_wheel_vel_scale` | `1.0` | 乘到里程计用的轮速（不改 `/body_information` 原始值） |
+| `chassis_wheel_vel_deadband` | `0.03` | \|ω\| 低于此不积分 xy（rad/s） |
 
-解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；位姿用 IMU yaw + body `(vx,vy)` 积分。无外部定位仍会漂。
+解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；**yaw 用 IMU**，**xy 用轮速逆解的 body (vx,vy)** 在 world 下积分。`mode≠1` 或轮速低于死区时只更新 yaw，避免静止/冻结 `0x702` 漂位。无外部定位仍会漂；`0x702` 非干净编码器时精度有限。
 
 ```bash
-# 先测反馈（默认）。官方文档：须先启动底盘运动控制（mode=1）再看轮速。
+# 反馈
 ros2 topic echo /arx_imu
-ros2 topic echo /arx_lift/wheel_vel
-# 官方同款话题（arm_control/PosCmd）；轮速在 temp_float_data[1..3]
 ros2 topic echo /body_information
-# 开底盘后再看轮速 / CAN 0x702：
-# ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}" -r 20
-# timeout 5 candump can5,702:7FF
-# 后续再开 odom/TF 时：
-# ros2 topic echo /arx_lift/odom
-# ros2 run tf2_ros tf2_echo world base_link
+# odom / TF（Lift2S 默认开）
+ros2 topic echo /arx_lift/odom
+ros2 run tf2_ros tf2_echo world base_link
+# 临时关 TF（回 WBC identity）：
+# ... launch ... xacro_enable_chassis_odom_tf:=false xacro_enable_chassis_odom:=false
 ```
 
 ## 依赖

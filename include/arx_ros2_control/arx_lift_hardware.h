@@ -63,9 +63,10 @@ namespace arx_ros2_control
  *   ``getOrientation/AngularVel/Accel`` → ``/arx_imu``；
  *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
  * - ``enable_chassis_odom``：用 **轮速逆解（Isaac Holonomic 正向之逆）+ IMU yaw**
- *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分）
- * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（默认关；关时 WBC 发 identity 占位 TF）
- * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速（默认关）
+ *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分；Lift2S xacro 默认开）
+ * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（Lift2S 默认开；关时 WBC identity）
+ * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速
+ * - 里程计门控：仅 chassis ``mode=1`` 且轮速过死区时积分 xy；yaw 始终跟 IMU
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -259,16 +260,22 @@ private:
   std::string chassis_odom_topic_{"/arx_lift/odom"};
 
   /**
-   * Lift2S 三全向轮几何（chassis.xacro / FaSim ARX_LIFT2S.usda）：
+   * Lift2S 三全向轮几何（官方轮组编号 / chassis.xacro 位姿）：
+   *   [0]=轮1 车尾, [1]=轮2 右前, [2]=轮3 左前（与 getWheelVel / body_information 一致）
    * Omnia150 r=0.075；mecanumAngles=90° → 驱动方向 = R_z(θ)·Ŷ。
    * 与 Isaac HolonomicController 正向模型一致，此处做逆解。
    */
   double chassis_wheel_radius_m_{0.075};
   double chassis_mecanum_angle_deg_{90.0};
-  double wheel_x_[3]{0.15361, 0.15361, -0.35293};
-  double wheel_y_[3]{0.29246, -0.29245, 0.0};
-  double wheel_yaw_[3]{1.0472, -1.0472, 3.1415};
+  // 官方编号顺序（非 URDF wheel_1/2/3 命名顺序：xacro 里 wheel_1=左前）
+  double wheel_x_[3]{-0.35293, 0.15361, 0.15361};
+  double wheel_y_[3]{0.0, -0.29245, 0.29246};
+  double wheel_yaw_[3]{3.1415, -1.0472, 1.0472};
   double wheel_vel_sign_[3]{1.0, 1.0, 1.0};
+  /** 乘到 getWheelVel 上（标定 0x702 刻度）；默认 1。 */
+  double chassis_wheel_vel_scale_{1.0};
+  /** |ω| 低于此值视为静止，不积分 xy（rad/s）。 */
+  double chassis_wheel_vel_deadband_{0.03};
   bool chassis_kinematics_ok_{false};
   /** r*ω = J_rw_from_body_ * [vx,vy,wz]；body = J_body_from_rw_ * (r*ω)。 */
   Eigen::Matrix3d J_rw_from_body_{Eigen::Matrix3d::Zero()};
@@ -282,6 +289,9 @@ private:
     wheel_vel_expected_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  /** 限制 world→base_link 发布频率，避免淹没 /tf（RSP 关节 TF）。 */
+  rclcpp::Time last_chassis_tf_pub_{0, 0, RCL_SYSTEM_TIME};
+  double chassis_tf_pub_period_sec_{0.02};  // 50 Hz
 
   /** 航迹：IMU yaw 相对零位 + 轮速逆解得到的 body vx/vy 积分。 */
   std::mutex odom_mutex_;

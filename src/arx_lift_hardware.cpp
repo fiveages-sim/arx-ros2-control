@@ -541,10 +541,12 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
   }
   if (enable_chassis_odom_tf_) {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
+    last_chassis_tf_pub_ = rclcpp::Time(0, 0, RCL_SYSTEM_TIME);
     RCLCPP_INFO(
       get_logger(),
-      "Chassis odom TF enabled: %s→%s (continuous; replaces WBC identity placeholder)",
-      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
+      "Chassis odom TF enabled: %s→%s (≤%.0f Hz; replaces WBC identity placeholder)",
+      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str(),
+      1.0 / chassis_tf_pub_period_sec_);
   }
   if (enable_chassis_odom_debug_) {
     wheel_vel_expected_pub_ =
@@ -557,15 +559,17 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
       chassis_wheel_vel_topic_.c_str());
   }
 
-  // Activate 立刻发一帧 identity，保证 WBC 探测窗内能看到外部 TF，从而跳过占位 TF。
+  // Activate 立刻发一帧零位 TF；随后 loop 线程持续刷新（stamp 必须用 SYSTEM，
+  // 与 robot_state_publisher / joint_states 同时钟；用 HI get_clock() 会落到
+  // ~uptime 秒，与墙钟关节 TF 拼链失败 → RViz Fixed Frame=world 只剩底盘）。
   if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
-    rclcpp::Time stamp;
-    try {
-      stamp = get_clock()->now();
-    } catch (...) {
-      stamp = rclcpp::Clock(RCL_ROS_TIME).now();
-    }
+    const rclcpp::Time stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
     publishChassisOdomAndTf(stamp, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+    RCLCPP_INFO(
+      get_logger(),
+      "Published initial chassis odom/TF %s→%s (zero pose, SYSTEM time); "
+      "continuous updates follow",
+      chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str());
   }
 }
 
@@ -628,7 +632,7 @@ bool ArxLiftHardware::buildChassisKinematics()
   chassis_kinematics_ok_ = true;
   RCLCPP_INFO(
     get_logger(),
-    "Chassis kinematics OK (3-omni / Isaac mecanum=90 inverse): "
+    "Chassis kinematics OK (3-omni / official wheel order 1=rear,2=FR,3=FL): "
     "r=%.4f m wheels xyz=(%.4f,%.4f)/(%.4f,%.4f)/(%.4f,%.4f) "
     "yaw=%.4f/%.4f/%.4f sign=%.0f/%.0f/%.0f",
     chassis_wheel_radius_m_, wheel_x_[0], wheel_y_[0], wheel_x_[1], wheel_y_[1],
@@ -694,18 +698,30 @@ void ArxLiftHardware::publishChassisOdomAndTf(
   q_yaw.setRPY(0.0, 0.0, yaw);
 
   if (enable_chassis_odom_tf_ && tf_broadcaster_) {
-    geometry_msgs::msg::TransformStamped tf_msg;
-    tf_msg.header.stamp = stamp;
-    tf_msg.header.frame_id = chassis_odom_parent_frame_;
-    tf_msg.child_frame_id = chassis_odom_child_frame_;
-    tf_msg.transform.translation.x = x;
-    tf_msg.transform.translation.y = y;
-    tf_msg.transform.translation.z = 0.0;
-    tf_msg.transform.rotation.x = q_yaw.x();
-    tf_msg.transform.rotation.y = q_yaw.y();
-    tf_msg.transform.rotation.z = q_yaw.z();
-    tf_msg.transform.rotation.w = q_yaw.w();
-    tf_broadcaster_->sendTransform(tf_msg);
+    // 节流：loop ~400Hz，若每拍都发 world→base_link 会淹没 /tf，RViz Fixed Frame=world
+    // 时关节 TF 易丢，表现为「机器人显示不全」。odom 话题仍可按调用频率发。
+    bool publish_tf = true;
+    if (last_chassis_tf_pub_.nanoseconds() != 0) {
+      const double dt = (stamp - last_chassis_tf_pub_).seconds();
+      if (dt >= 0.0 && dt < chassis_tf_pub_period_sec_) {
+        publish_tf = false;
+      }
+    }
+    if (publish_tf) {
+      geometry_msgs::msg::TransformStamped tf_msg;
+      tf_msg.header.stamp = stamp;
+      tf_msg.header.frame_id = chassis_odom_parent_frame_;
+      tf_msg.child_frame_id = chassis_odom_child_frame_;
+      tf_msg.transform.translation.x = x;
+      tf_msg.transform.translation.y = y;
+      tf_msg.transform.translation.z = 0.0;
+      tf_msg.transform.rotation.x = q_yaw.x();
+      tf_msg.transform.rotation.y = q_yaw.y();
+      tf_msg.transform.rotation.z = q_yaw.z();
+      tf_msg.transform.rotation.w = q_yaw.w();
+      tf_broadcaster_->sendTransform(tf_msg);
+      last_chassis_tf_pub_ = stamp;
+    }
   }
 
   if (odom_pub_) {
@@ -739,12 +755,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     return;
   }
 
-  rclcpp::Time stamp;
-  try {
-    stamp = get_clock()->now();
-  } catch (...) {
-    stamp = rclcpp::Clock(RCL_ROS_TIME).now();
-  }
+  rclcpp::Time stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
 
   double wheel_vel[4] = {0.0, 0.0, 0.0, 0.0};
   double orientation[3] = {0.0, 0.0, 0.0};
@@ -861,10 +872,26 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     return;
   }
 
+  // 标定刻度 / 死区：仅影响里程计，不改 /body_information 原始反馈。
+  double wheel_for_odom[4] = {
+    wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]};
+  const double scale = chassis_wheel_vel_scale_;
+  const double deadband = chassis_wheel_vel_deadband_;
+  for (int i = 0; i < 4; ++i) {
+    if (!std::isfinite(wheel_for_odom[i])) {
+      wheel_for_odom[i] = 0.0;
+      continue;
+    }
+    wheel_for_odom[i] *= scale;
+    if (std::abs(wheel_for_odom[i]) < deadband) {
+      wheel_for_odom[i] = 0.0;
+    }
+  }
+
   double vx_b = 0.0;
   double vy_b = 0.0;
   double wz_b = 0.0;
-  const bool twist_ok = bodyTwistFromWheelVel(wheel_vel, vx_b, vy_b, wz_b);
+  const bool twist_ok = bodyTwistFromWheelVel(wheel_for_odom, vx_b, vy_b, wz_b);
   if (!twist_ok) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
@@ -875,6 +902,12 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       wz_b = angular_vel[2];
     }
   }
+
+  // mode≠1 时 0x702 常冻结/停刷：只更新 yaw，不积分平移，避免用陈旧轮速漂。
+  const bool chassis_motion_mode = (chassis_mode_cmd_.load() == 1);
+  const bool integrate_xy =
+    twist_ok && chassis_motion_mode && dt_s > 0.0 &&
+    (std::abs(vx_b) > 1e-6 || std::abs(vy_b) > 1e-6);
 
   double x = 0.0;
   double y = 0.0;
@@ -889,6 +922,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       odom_yaw_ = 0.0;
     }
 
+    // yaw 始终跟 IMU 相对零位（不依赖轮速质量）。
     yaw = orientation[2] - odom_yaw0_;
     while (yaw > M_PI) {
       yaw -= 2.0 * M_PI;
@@ -898,7 +932,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     }
     odom_yaw_ = yaw;
 
-    if (twist_ok && dt_s > 0.0) {
+    if (integrate_xy) {
       const double c = std::cos(yaw);
       const double s = std::sin(yaw);
       odom_x_ += (vx_b * c - vy_b * s) * dt_s;
@@ -1294,12 +1328,37 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   {
     return hardware_interface::CallbackReturn::ERROR;
   }
+  if (!parse_double_param(
+      info_, "chassis_wheel_vel_scale", 1.0, chassis_wheel_vel_scale_,
+      get_logger()) ||
+    !parse_double_param(
+      info_, "chassis_wheel_vel_deadband", 0.03, chassis_wheel_vel_deadband_,
+      get_logger()))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
   if (
     !std::isfinite(chassis_wheel_radius_m_) || chassis_wheel_radius_m_ <= 0.0)
   {
     RCLCPP_ERROR(
       get_logger(), "chassis_wheel_radius_m must be finite and > 0 (got %.4f)",
       chassis_wheel_radius_m_);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (
+    !std::isfinite(chassis_wheel_vel_scale_) ||
+    chassis_wheel_vel_scale_ == 0.0)
+  {
+    RCLCPP_ERROR(
+      get_logger(), "chassis_wheel_vel_scale must be finite and non-zero");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (
+    !std::isfinite(chassis_wheel_vel_deadband_) ||
+    chassis_wheel_vel_deadband_ < 0.0)
+  {
+    RCLCPP_ERROR(
+      get_logger(), "chassis_wheel_vel_deadband must be finite and >= 0");
     return hardware_interface::CallbackReturn::ERROR;
   }
   // 默认几何 = chassis.xacro / FaSim ARX_LIFT2S（可覆盖）。
@@ -1384,7 +1443,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s "
     "chassis_max_vel=%.2f/%.2f/%.2f "
     "chassis_feedback=%s odom=%s odom_tf=%s odom_debug=%s (%s→%s) "
-    "wheel_r=%.4f mecanum_deg=%.1f",
+    "wheel_r=%.4f mecanum_deg=%.1f vel_scale=%.3f deadband=%.3f",
     lift_joint_name_.c_str(), can_name_.c_str(), robot_type_,
     motor_mode_param_.c_str(), soft_p_kp_.load(), hybrid_kp_.load(),
     hybrid_kd_.load(), gravity_compensation_torque_.load(),
@@ -1398,7 +1457,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     enable_chassis_odom_tf_ ? "true" : "false",
     enable_chassis_odom_debug_ ? "true" : "false",
     chassis_odom_parent_frame_.c_str(), chassis_odom_child_frame_.c_str(),
-    chassis_wheel_radius_m_, chassis_mecanum_angle_deg_);
+    chassis_wheel_radius_m_, chassis_mecanum_angle_deg_,
+    chassis_wheel_vel_scale_, chassis_wheel_vel_deadband_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
