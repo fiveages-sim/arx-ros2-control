@@ -823,10 +823,9 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
           "getWheelVel all zeros (chassis_mode=%d). Official doc: wheel "
-          "feedback only AFTER chassis motion control (mode=1). Try: "
-          "ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "
-          ""{linear: {x: 0.15}}" -r 20 ; and candump can5,702:7FF. "
-          "Echo: /arx_lift/wheel_vel or /arx_lift/body_temp_float_data "
+          "feedback only AFTER chassis motion control (mode=1). "
+          "Publish /cmd_vel at ~20 Hz, then candump can5,702:7FF; "
+          "echo /arx_lift/wheel_vel or /arx_lift/body_temp_float_data "
           "(indices 1..3 = LIFT wheels).",
           mode);
       } else {
