@@ -247,7 +247,7 @@ private:
   bool enable_chassis_feedback_{true};
   bool enable_chassis_odom_{false};
   bool enable_chassis_odom_tf_{false};
-  bool enable_chassis_odom_debug_{false};
+  bool enable_chassis_odom_debug_{true};
   std::string chassis_odom_parent_frame_{"world"};
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};

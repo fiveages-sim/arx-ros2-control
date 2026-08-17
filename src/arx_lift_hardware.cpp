@@ -1259,7 +1259,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   parse_bool_param(
     info_, "enable_chassis_odom_tf", false, enable_chassis_odom_tf_);
   parse_bool_param(
-    info_, "enable_chassis_odom_debug", false, enable_chassis_odom_debug_);
+    info_, "enable_chassis_odom_debug", true, enable_chassis_odom_debug_);
   chassis_odom_parent_frame_ =
     get_hw_param(info_, "chassis_odom_parent_frame", "world");
   chassis_odom_child_frame_ =
