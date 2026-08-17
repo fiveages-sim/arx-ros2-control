@@ -63,7 +63,7 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 | `lift_motor_mode` | 说明 |
 |-------------------|------|
 | `hybrid`（默认） | `sendLiftHybrid`；跟踪 pos+vel；HI 重力/摩擦前馈 |
-| `soft_p` / `position` | Soft-P `setHeight`；仅跟踪 position |
+| `soft_p` / `position` | 仅跟踪 position；Type3 + **常值** `τ_g`（无库仑摩擦）；底盘 `sendChassisOnly` |
 
 ### 底盘 `cmd_vel`（可选）
 
@@ -75,8 +75,8 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 | `chassis_max_vel_{x,y,z}` | `2/2/4` | `setChassisCmd` 量化上限；**LIFTS 的 .so 未写这些，必须由 HI 补** |
 
 映射：`linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`（ROS Twist 原样）；mode=1 运行 / mode=2 停车。  
-**hybrid（OCS2 推荐）**：升降每拍 `sendLiftHybrid`；底盘 `vx/vy/wz` 每拍 `sendChassisOnly`（仅 `0x701/0x703`，**不绑 Soft-P**）。  
-soft_p：`loop()` 同时带升降+底盘；全身 OCS2 下易掉柱，仅适合 HOME/点动。  
+**升降与底盘分开发（hybrid / soft_p 相同）**：升降 Type3；底盘 `vx/vy/wz` 每拍 `sendChassisOnly`（仅 `0x701/0x703`）。  
+`soft_p` 只跟 position（直跟，忽略上层 vel/effort），持高靠 `soft_p_kp` + 常值 `arx_lift.gravity_compensation_torque`（不加摩擦项）。`loop()` 仅校准期使用。`cmd_ramp_vel` 只用于关机回零插值。  
 `chassis_max_vel_{x,y,z}` 须由 HI 写入（LIFTS 的 .so 未初始化）。  
 Lift2S xacro 默认开；若与 WBC 底盘规划抢指令可传 `enable_chassis_cmd_vel:=false`。
 
