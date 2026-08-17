@@ -519,16 +519,15 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
       chassis_imu_topic_, rclcpp::SystemDefaultsQoS());
     wheel_vel_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
       chassis_wheel_vel_topic_, rclcpp::SystemDefaultsQoS());
-    body_temp_float_pub_ =
-      node->create_publisher<std_msgs::msg::Float64MultiArray>(
-        chassis_body_temp_float_topic_, rclcpp::SystemDefaultsQoS());
+    body_information_pub_ = node->create_publisher<arm_control::msg::PosCmd>(
+      chassis_body_information_topic_, rclcpp::SystemDefaultsQoS());
     RCLCPP_INFO(
       get_logger(),
       "Chassis feedback enabled (official lift_controller style): imu=%s "
-      "wheel_vel=%s body_temp_float=%s "
-      "(official: wheel speeds only after chassis motion mode=1)",
+      "wheel_vel=%s body_information=%s "
+      "(PosCmd.temp_float_data[1..4]=getWheelVel; needs chassis motion mode=1)",
       chassis_imu_topic_.c_str(), chassis_wheel_vel_topic_.c_str(),
-      chassis_body_temp_float_topic_.c_str());
+      chassis_body_information_topic_.c_str());
   }
   if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
     odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>(
@@ -574,7 +573,7 @@ void ArxLiftHardware::teardownChassisFeedbackPublishers()
 {
   imu_pub_.reset();
   wheel_vel_pub_.reset();
-  body_temp_float_pub_.reset();
+  body_information_pub_.reset();
   wheel_vel_expected_pub_.reset();
   odom_pub_.reset();
   tf_broadcaster_.reset();
@@ -806,13 +805,24 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       wheels.data = {wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]};
       wheel_vel_pub_->publish(wheels);
     }
-    // 对齐官方 /body_information.temp_float_data：
-    // [0]=腰(Lift2S 无，填 0)，[1..4]=getWheelVel；LIFT 看 1/2/3 三位。
-    if (body_temp_float_pub_) {
-      std_msgs::msg::Float64MultiArray body;
-      body.data = {
-        0.0, wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3], 0.0};
-      body_temp_float_pub_->publish(body);
+    // 官方 lift_controller：/body_information = PosCmd
+    // height/head_* + temp_float_data[0]=waist, [1..4]=getWheelVel
+    if (body_information_pub_) {
+      // 字段填充对齐 LIFT_NEW lift_controller.cpp（仅这些被赋值）
+      arm_control::msg::PosCmd body;
+      try {
+        body.head_yaw = lift_->getHeadYaw();
+        body.head_pit = lift_->getHeadPitch();
+        body.height = lift_->getHeight();
+        body.temp_float_data[0] = lift_->getWaistPos();
+      } catch (...) {
+        body.height = lift_position_;
+        body.temp_float_data[0] = 0.0;
+      }
+      for (int i = 0; i < 4; ++i) {
+        body.temp_float_data[i + 1] = wheel_vel[i];
+      }
+      body_information_pub_->publish(body);
     }
     {
       const bool all_zero =
@@ -822,17 +832,15 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       if (all_zero) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
-          "getWheelVel all zeros (chassis_mode=%d). Official doc: wheel "
-          "feedback only AFTER chassis motion control (mode=1). "
-          "Publish /cmd_vel at ~20 Hz, then candump can5,702:7FF; "
-          "echo /arx_lift/wheel_vel or /arx_lift/body_temp_float_data "
-          "(indices 1..3 = LIFT wheels).",
+          "getWheelVel all zeros (chassis_mode=%d). Official: echo "
+          "/body_information after chassis motion; check temp_float_data[1..3] "
+          "and candump can5,702:7FF",
           mode);
       } else {
         RCLCPP_INFO_THROTTLE(
           get_logger(), *get_clock(), 2000,
-          "getWheelVel ok mode=%d w=[%.4f %.4f %.4f %.4f]", mode, wheel_vel[0],
-          wheel_vel[1], wheel_vel[2], wheel_vel[3]);
+          "getWheelVel ok mode=%d w=[%.4f %.4f %.4f %.4f] -> /body_information",
+          mode, wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]);
       }
     }
   }
@@ -1267,8 +1275,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   chassis_imu_topic_ = get_hw_param(info_, "chassis_imu_topic", "/arx_imu");
   chassis_wheel_vel_topic_ =
     get_hw_param(info_, "chassis_wheel_vel_topic", "/arx_lift/wheel_vel");
-  chassis_body_temp_float_topic_ = get_hw_param(
-    info_, "chassis_body_temp_float_topic", "/arx_lift/body_temp_float_data");
+  chassis_body_information_topic_ = get_hw_param(
+    info_, "chassis_body_information_topic", "/body_information");
   chassis_wheel_vel_expected_topic_ = get_hw_param(
     info_, "chassis_wheel_vel_expected_topic",
     "/arx_lift/wheel_vel_expected");
@@ -1345,8 +1353,8 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   if (chassis_wheel_vel_topic_.empty()) {
     chassis_wheel_vel_topic_ = "/arx_lift/wheel_vel";
   }
-  if (chassis_body_temp_float_topic_.empty()) {
-    chassis_body_temp_float_topic_ = "/arx_lift/body_temp_float_data";
+  if (chassis_body_information_topic_.empty()) {
+    chassis_body_information_topic_ = "/body_information";
   }
   if (chassis_wheel_vel_expected_topic_.empty()) {
     chassis_wheel_vel_expected_topic_ = "/arx_lift/wheel_vel_expected";

@@ -20,6 +20,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(arm_control REQUIRED)
 
 find_package(Eigen3 REQUIRED)
 find_package(orocos_kdl REQUIRED)
@@ -126,6 +127,7 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
   nav_msgs
   tf2
   tf2_ros
+  arm_control
 )
 
 # PRIVATE: HI is loaded via pluginlib; do not re-export SDK / joint .so into ament export.
@@ -237,6 +239,7 @@ ament_export_dependencies(
   nav_msgs
   tf2
   tf2_ros
+  arm_control
 )
 
 ament_package()

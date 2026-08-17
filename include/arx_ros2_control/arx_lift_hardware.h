@@ -21,6 +21,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <arm_control/msg/pos_cmd.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -252,8 +253,8 @@ private:
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};
   std::string chassis_wheel_vel_topic_{"/arx_lift/wheel_vel"};
-  /** 对齐官方 /body_information.temp_float_data：[0]=腰占位，[1..4]=轮速。 */
-  std::string chassis_body_temp_float_topic_{"/arx_lift/body_temp_float_data"};
+  /** 官方 lift_controller 同名话题（arm_control/PosCmd）。 */
+  std::string chassis_body_information_topic_{"/body_information"};
   std::string chassis_wheel_vel_expected_topic_{"/arx_lift/wheel_vel_expected"};
   std::string chassis_odom_topic_{"/arx_lift/odom"};
 
@@ -275,9 +276,8 @@ private:
 
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_vel_pub_;
-  /** 官方文档同布局：temp_float_data[1..3]=LIFT 三轮（[4] 常 0）。 */
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
-    body_temp_float_pub_;
+  /** 官方 /body_information（PosCmd；轮速在 temp_float_data[1..4]）。 */
+  rclcpp::Publisher<arm_control::msg::PosCmd>::SharedPtr body_information_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
     wheel_vel_expected_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
