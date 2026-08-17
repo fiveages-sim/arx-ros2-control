@@ -63,9 +63,8 @@ namespace arx_ros2_control
  *   ``getWheelVel`` → ``/arx_lift/wheel_vel``
  * - ``enable_chassis_odom``：用 **轮速逆解（Isaac Holonomic 正向之逆）+ IMU yaw**
  *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分）
- * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（默认开；activate 起即发，
- *   SDK 失败时 hold last pose，让 WBC 跳过 identity 占位 TF）
- * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速，便于真机对比
+ * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（默认关；关时 WBC 发 identity 占位 TF）
+ * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速（默认关）
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
 {
@@ -244,9 +243,9 @@ private:
 
   /** 对齐官方 lift_controller：发 /arx_imu + 轮速；可选轮速+IMU 里程计。 */
   bool enable_chassis_feedback_{true};
-  bool enable_chassis_odom_{true};
-  bool enable_chassis_odom_tf_{true};
-  bool enable_chassis_odom_debug_{true};
+  bool enable_chassis_odom_{false};
+  bool enable_chassis_odom_tf_{false};
+  bool enable_chassis_odom_debug_{false};
   std::string chassis_odom_parent_frame_{"world"};
   std::string chassis_odom_child_frame_{"base_link"};
   std::string chassis_imu_topic_{"/arx_imu"};

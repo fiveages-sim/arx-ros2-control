@@ -1217,11 +1217,11 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
   // 官方无 odom：只发 IMU+轮速。本 HI 对齐 raw，另用轮速逆解+IMU 自算 /arx_lift/odom。
   parse_bool_param(
     info_, "enable_chassis_feedback", true, enable_chassis_feedback_);
-  parse_bool_param(info_, "enable_chassis_odom", true, enable_chassis_odom_);
+  parse_bool_param(info_, "enable_chassis_odom", false, enable_chassis_odom_);
   parse_bool_param(
-    info_, "enable_chassis_odom_tf", true, enable_chassis_odom_tf_);
+    info_, "enable_chassis_odom_tf", false, enable_chassis_odom_tf_);
   parse_bool_param(
-    info_, "enable_chassis_odom_debug", true, enable_chassis_odom_debug_);
+    info_, "enable_chassis_odom_debug", false, enable_chassis_odom_debug_);
   chassis_odom_parent_frame_ =
     get_hw_param(info_, "chassis_odom_parent_frame", "world");
   chassis_odom_child_frame_ =
@@ -1281,8 +1281,17 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     wheel_vel_sign_[i] = (wheel_vel_sign_[i] < 0.0) ? -1.0 : 1.0;
   }
   if (!buildChassisKinematics()) {
-    RCLCPP_ERROR(get_logger(), "Failed to build chassis kinematics at init");
-    return hardware_interface::CallbackReturn::ERROR;
+    if (enable_chassis_odom_ || enable_chassis_odom_tf_ ||
+      enable_chassis_odom_debug_)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Failed to build chassis kinematics at init (required for odom/TF/debug)");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Chassis kinematics build failed; IMU/wheel feedback can still run");
   }
   if (chassis_odom_parent_frame_.empty()) {
     chassis_odom_parent_frame_ = "world";

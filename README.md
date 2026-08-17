@@ -93,10 +93,10 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel` |
-| `enable_chassis_odom` | `true` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
-| `enable_chassis_odom_tf` | `true` | 持续广播 `world→base_link`（activate 起即发；SDK 失败 hold last pose）。WBC 探测到外部 TF 后**不再**发 identity 占位 TF |
-| `enable_chassis_odom_debug` | `true` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
+| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel`（先验证 SDK 读数） |
+| `enable_chassis_odom` | `false` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
+| `enable_chassis_odom_tf` | `false` | 广播 `world→base_link`；默认关，全身 RViz 用 WBC identity 占位 TF |
+| `enable_chassis_odom_debug` | `false` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
 | `chassis_odom_parent_frame` | `world` | odom/`TF` 父系 |
 | `chassis_odom_child_frame` | `base_link` | 子系（Lift2S URDF root） |
 | `chassis_wheel_radius_m` | `0.075` | Omnia150；可标定 |
@@ -105,11 +105,12 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；位姿用 IMU yaw + body `(vx,vy)` 积分。无外部定位仍会漂。
 
 ```bash
-ros2 topic echo /arx_imu --once
-ros2 topic echo /arx_lift/wheel_vel --once
-ros2 topic echo /arx_lift/wheel_vel_expected --once
-ros2 topic echo /arx_lift/odom --once
-ros2 run tf2_ros tf2_echo world base_link
+# 先测反馈（默认）
+ros2 topic echo /arx_imu
+ros2 topic echo /arx_lift/wheel_vel
+# 后续再开 odom/TF 时：
+# ros2 topic echo /arx_lift/odom
+# ros2 run tf2_ros tf2_echo world base_link
 ```
 
 ## 依赖
