@@ -799,6 +799,17 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       std_msgs::msg::Float64MultiArray wheels;
       wheels.data = {wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]};
       wheel_vel_pub_->publish(wheels);
+      const bool all_zero =
+        wheel_vel[0] == 0.0 && wheel_vel[1] == 0.0 && wheel_vel[2] == 0.0 &&
+        wheel_vel[3] == 0.0;
+      if (all_zero) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "getWheelVel all zeros — SDK only fills this from CAN 0x702 "
+          "(chassis wheel feedback). Bus typically has 0x706/707/708 IMU but "
+          "may never emit 0x702 on Lift2S; pushing freewheels will not help. "
+          "Check: timeout 5 candump can5,702:7FF");
+      }
     }
   }
 

@@ -93,7 +93,7 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_feedback` | `true` | `/arx_imu` + `/arx_lift/wheel_vel`（先验证 SDK 读数） |
+| `enable_chassis_feedback` | `true` | `/arx_imu`（CAN `0x706/707/708`）+ `/arx_lift/wheel_vel`（CAN **`0x702`**；Lift2S 现场可能无此帧→恒为 0） |
 | `enable_chassis_odom` | `false` | 轮速逆解 + IMU yaw → `/arx_lift/odom` |
 | `enable_chassis_odom_tf` | `false` | 广播 `world→base_link`；默认关，全身 RViz 用 WBC identity 占位 TF |
 | `enable_chassis_odom_debug` | `false` | 用最近 `cmd_vel` 正解发 `/arx_lift/wheel_vel_expected` |
