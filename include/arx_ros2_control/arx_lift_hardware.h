@@ -23,6 +23,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <arm_control/msg/pos_cmd.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -52,11 +53,13 @@ namespace arx_ros2_control
  *   kp/kd = ``arx_lift.hybrid_kp/kd``；
  *   ``τ_ff = gravity - coulomb * sign(v_cmd)``（忽略上层 effort）
  *
- * 底盘（可选，URDF ``enable_chassis_cmd_vel``）：
+ * 底盘（可选，URDF ``enable_chassis_cmd_vel`` / ``chassis_mode``）：
  * - 订阅 ``chassis_cmd_vel_topic``（默认 ``/cmd_vel``）→ ``setChassisCmd``
  * - Twist ``vx/vy/wz`` 原样（对齐 body_communicator；勿套 PosCmd ``-chy``）
- * - 两种模式：升降与底盘分开发；底盘 ``sendChassisOnly``（0x701/0x703）
- * - 运行 mode=1；超时 / 退出 / soft-stop → mode=2 停车
+ * - 升降与底盘分开发；底盘 ``sendChassisOnly``（0x701/0x703）
+ * - ``chassis_mode``：1=车体速度（``/cmd_vel``）；3=单轮速度保持（车体速度与
+ *   ``setWheelVel`` 均为 0，持续发 CAN，便于手转轮看 ``0x702``）；
+ *   超时 / 退出 / soft-stop → mode=2 停车
  *
  * 底盘反馈 / 里程计（可选；官方无现成 odom，仅发 IMU+轮速）：
  * - ``enable_chassis_feedback``：对齐官方 lift_controller —
@@ -66,6 +69,7 @@ namespace arx_ros2_control
  *   积分发 ``/arx_lift/odom``（**不用** ``cmd_vel`` 积分；Lift2S xacro 默认开）
  * - ``enable_chassis_odom_tf``：持续广播 ``world→base_link``（Lift2S 默认开；关时 WBC identity）
  * - ``enable_chassis_odom_debug``：用最近 ``cmd_vel`` 正解发期望轮速
+ * - ``/arx_lift/reset_odom``（``std_msgs/Empty``）：把当前位姿设为 odom/TF 原点
  * - 里程计门控：仅 chassis ``mode=1`` 且轮速过死区时积分 xy；yaw 始终跟 IMU
  */
 class ArxLiftHardware : public hardware_interface::SystemInterface
@@ -129,7 +133,7 @@ private:
   void softStopLift();
   void setupChassisCmdVelSubscription();
   void teardownChassisCmdVelSubscription();
-  /** @return true 若底盘为运行 mode=1（有有效 cmd_vel）。 */
+  /** @return true 若本周期持续发底盘 CAN（mode=1 有 cmd_vel，或 mode=3 保持）。 */
   bool applyChassisCmd(bool force_park);
   /** 只发 0x701/0x703（不发升降）。 */
   void flushChassisCanOnly();
@@ -241,7 +245,12 @@ private:
   std::atomic<int64_t> chassis_cmd_stamp_ns_{0};
   /** Hybrid 下 mode=2 停车帧是否已刷过。 */
   bool chassis_park_flushed_{false};
-  /** 最近下发的底盘 mode：1=运行，2=停车（官方：运动控制启动后才有轮速反馈）。 */
+  /**
+   * URDF ``chassis_mode``：1=车体速度，3=单轮速度保持（指令全 0）。
+   * 退出 / force_park 仍下发 2。
+   */
+  int chassis_mode_{1};
+  /** 最近实际下发的底盘 mode（1/2/3）。 */
   std::atomic<int> chassis_mode_cmd_{2};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
 
@@ -258,6 +267,7 @@ private:
   std::string chassis_body_information_topic_{"/body_information"};
   std::string chassis_wheel_vel_expected_topic_{"/arx_lift/wheel_vel_expected"};
   std::string chassis_odom_topic_{"/arx_lift/odom"};
+  std::string chassis_odom_reset_topic_{"/arx_lift/reset_odom"};
 
   /**
    * Lift2S 三全向轮几何（官方轮组编号 / chassis.xacro 位姿）：
@@ -288,6 +298,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
     wheel_vel_expected_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr chassis_odom_reset_sub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   /** 限制 world→base_link 发布频率，避免淹没 /tf（RSP 关节 TF）。 */
   rclcpp::Time last_chassis_tf_pub_{0, 0, RCL_SYSTEM_TIME};
@@ -296,6 +307,7 @@ private:
   /** 航迹：IMU yaw 相对零位 + 轮速逆解得到的 body vx/vy 积分。 */
   std::mutex odom_mutex_;
   bool odom_yaw_initialized_{false};
+  std::atomic<bool> odom_reset_requested_{false};
   double odom_yaw0_{0.0};
   double odom_x_{0.0};
   double odom_y_{0.0};

@@ -69,12 +69,13 @@ ros2 launch ocs2_arm_controller split_body.launch.py robot:=arx_lift2s hardware:
 
 | hardware 参数 | 默认 | 说明 |
 |---------------|------|------|
-| `enable_chassis_cmd_vel` | `true`（xacro 默认） | 订阅 Twist → `setChassisCmd` |
+| `enable_chassis_cmd_vel` | `true`（xacro 默认） | 订阅 Twist → `setChassisCmd`（仅 `chassis_mode=1` 时生效） |
+| `chassis_mode` | `1`（Lift2S xacro） | `1` 车体速度；`3` 单轮速度保持（车体/轮速指令=0）；退出仍 `2` |
 | `chassis_cmd_vel_topic` | `/cmd_vel` | 话题名 |
 | `chassis_cmd_timeout` | `0.3` | 超时停车（s）；mode=2 |
 | `chassis_max_vel_{x,y,z}` | `2/2/4` | `setChassisCmd` 量化上限；**LIFTS 的 .so 未写这些，必须由 HI 补** |
 
-映射：`linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`（ROS Twist 原样）；mode=1 运行 / mode=2 停车。  
+映射：`chassis_mode=1` 时 `linear.x/y` → `v_x/v_y`，`angular.z` → `w_z`；`chassis_mode=3` 时忽略 `/cmd_vel`，持续 `setChassisCmd(0,0,0,3)` + `setWheelVel(0..)`（官方 `/body_control` 的轮速模式，不下发轮速）。超时 / 退出仍 mode=2。  
 **升降与底盘分开发（hybrid / soft_p 相同）**：升降 Type3；底盘 `vx/vy/wz` 每拍 `sendChassisOnly`（仅 `0x701/0x703`）。  
 `soft_p` 只跟 position（直跟，忽略上层 vel/effort），持高靠 `soft_p_kp` + 常值 `arx_lift.gravity_compensation_torque`（不加摩擦项）。`loop()` 仅校准期使用。`cmd_ramp_vel` 只用于关机回零插值。  
 `chassis_max_vel_{x,y,z}` 须由 HI 写入（LIFTS 的 .so 未初始化）。  
@@ -106,6 +107,8 @@ MCU 内部有 `cmd_vel → 轮速` 正向（mode=1）；本 HI **不用** `cmd_v
 
 解算：`r·ω = J · [vx,vy,wz]`（驱动方向 `R_z(θ)·Ŷ`）；**yaw 用 IMU**，**xy 用轮速逆解的 body (vx,vy)** 在 world 下积分。`mode≠1` 或轮速低于死区时只更新 yaw，避免静止/冻结 `0x702` 漂位。无外部定位仍会漂；`0x702` 非干净编码器时精度有限。
 
+退出人工底盘（case 20）或 WBC `BASE_UNLOCK` 时，`VRInputHandler` 会发 `/arx_lift/reset_odom`（`std_msgs/Empty`）：下一帧 IMU yaw 作为零位，`x,y=0`，即把**当前车体位姿**设为 `world→base_link` 原点。RViz 面板进 OCS2 **不会**自动 reset，以免 TF 跳变把模型打飞。
+
 ```bash
 # 反馈
 ros2 topic echo /arx_imu
@@ -113,6 +116,8 @@ ros2 topic echo /body_information
 # odom / TF（Lift2S 默认开）
 ros2 topic echo /arx_lift/odom
 ros2 run tf2_ros tf2_echo world base_link
+# 手动把当前位姿设为 TF 原点：
+ros2 topic pub --once /arx_lift/reset_odom std_msgs/msg/Empty {}
 # 临时关 TF（回 WBC identity）：
 # ... launch ... xacro_enable_chassis_odom_tf:=false xacro_enable_chassis_odom:=false
 ```

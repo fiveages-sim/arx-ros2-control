@@ -21,7 +21,8 @@
  * - soft_p（position）：只用 position；Type3 位置环 + 常值 τ_g（无摩擦项）；忽略 vel/effort
  * - hybrid：直接跟 position + velocity；HI τ_ff（重力 + 库仑摩擦·(-sign(v_cmd))）；
  *   忽略控制器 effort（防 OCS2 RNEA 双重前馈）；增益来自 arx_lift.* 热调
- * - 底盘（两种模式相同）：vx/vy/wz → setChassisCmd + sendChassisOnly；与升降分开发
+ * - 底盘：mode=1 时 vx/vy/wz → setChassisCmd；mode=3 时车体/轮速指令均为 0 并持续发 CAN
+ *   （对齐官方 /body_control）；与升降分开发
  * - SDK loop() 仅用于校准期（lift 未 command_enabled）
  * - 可选反馈：SDK IMU/轮速；可选轮速逆解+IMU yaw → odom/TF
  */
@@ -38,6 +39,7 @@
 
 #include <Eigen/Dense>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 
 namespace arx_ros2_control
@@ -89,6 +91,26 @@ bool parse_bool_param(
   }
   out = (s == "true" || s == "1" || s == "yes" || s == "on");
   return true;
+}
+
+/** @brief 解析整型 hardware 参数；非法字符串返回 false。 */
+bool parse_int_param(
+  const hardware_interface::HardwareInfo & info, const std::string & key,
+  int default_value, int & out, const rclcpp::Logger & logger)
+{
+  const std::string raw = get_hw_param(info, key, "");
+  if (raw.empty()) {
+    out = default_value;
+    return true;
+  }
+  try {
+    out = std::stoi(raw);
+    return true;
+  } catch (const std::exception &) {
+    RCLCPP_ERROR(
+      logger, "Invalid %s parameter: '%s'", key.c_str(), raw.c_str());
+    return false;
+  }
 }
 
 /** @brief 解析浮点型 hardware 参数；非法字符串返回 false。 */
@@ -453,7 +475,8 @@ void ArxLiftHardware::sendSoftPHoldOrTrack(double q_sdk, bool chassis_active)
 
 void ArxLiftHardware::flushChassisForControlCycle(bool chassis_active)
 {
-  if (!enable_chassis_cmd_vel_) {
+  const bool send_chassis = enable_chassis_cmd_vel_ || chassis_mode_ == 3;
+  if (!send_chassis) {
     return;
   }
   if (chassis_active) {
@@ -532,12 +555,23 @@ void ArxLiftHardware::setupChassisFeedbackPublishers()
   if (enable_chassis_odom_ || enable_chassis_odom_tf_) {
     odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>(
       chassis_odom_topic_, rclcpp::SystemDefaultsQoS());
+    chassis_odom_reset_sub_ = node->create_subscription<std_msgs::msg::Empty>(
+      chassis_odom_reset_topic_, rclcpp::SystemDefaultsQoS(),
+      [this](const std_msgs::msg::Empty::SharedPtr) {
+        odom_reset_requested_.store(true);
+        RCLCPP_INFO(
+          get_logger(),
+          "Chassis odom origin reset requested (%s): next IMU sample becomes "
+          "yaw0, xy=0",
+          chassis_odom_reset_topic_.c_str());
+      });
     RCLCPP_INFO(
       get_logger(),
       "Chassis odom = inverse of Isaac Holonomic (mecanum=90°) + IMU yaw "
-      "(NOT cmd_vel): topic=%s frames %s→%s wheel_r=%.4f m",
+      "(NOT cmd_vel): topic=%s frames %s→%s wheel_r=%.4f m reset=%s",
       chassis_odom_topic_.c_str(), chassis_odom_parent_frame_.c_str(),
-      chassis_odom_child_frame_.c_str(), chassis_wheel_radius_m_);
+      chassis_odom_child_frame_.c_str(), chassis_wheel_radius_m_,
+      chassis_odom_reset_topic_.c_str());
   }
   if (enable_chassis_odom_tf_) {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
@@ -579,6 +613,7 @@ void ArxLiftHardware::teardownChassisFeedbackPublishers()
   wheel_vel_pub_.reset();
   body_information_pub_.reset();
   wheel_vel_expected_pub_.reset();
+  chassis_odom_reset_sub_.reset();
   odom_pub_.reset();
   tf_broadcaster_.reset();
 }
@@ -843,9 +878,9 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
       if (all_zero) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
-          "getWheelVel all zeros (chassis_mode=%d). Official: echo "
-          "/body_information after chassis motion; check temp_float_data[1..3] "
-          "and candump can5,702:7FF",
+          "getWheelVel all zeros (chassis_mode=%d). mode=3 hold: hand-spin "
+          "wheels and watch /body_information temp_float_data[1..3]; "
+          "mode=1: need /cmd_vel. Also candump can5,702:7FF",
           mode);
       } else {
         RCLCPP_INFO_THROTTLE(
@@ -903,7 +938,7 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     }
   }
 
-  // mode≠1 时 0x702 常冻结/停刷：只更新 yaw，不积分平移，避免用陈旧轮速漂。
+  // mode=1 才用轮速积分 xy；mode=3 手转测试只看 /body_information，避免 TF 乱漂。
   const bool chassis_motion_mode = (chassis_mode_cmd_.load() == 1);
   const bool integrate_xy =
     twist_ok && chassis_motion_mode && dt_s > 0.0 &&
@@ -912,14 +947,16 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
   double x = 0.0;
   double y = 0.0;
   double yaw = 0.0;
+  bool origin_reset = false;
   {
     std::lock_guard<std::mutex> lock(odom_mutex_);
-    if (!odom_yaw_initialized_) {
+    if (!odom_yaw_initialized_ || odom_reset_requested_.exchange(false)) {
       odom_yaw0_ = orientation[2];
       odom_yaw_initialized_ = true;
       odom_x_ = 0.0;
       odom_y_ = 0.0;
       odom_yaw_ = 0.0;
+      origin_reset = true;
     }
 
     // yaw 始终跟 IMU 相对零位（不依赖轮速质量）。
@@ -940,6 +977,14 @@ void ArxLiftHardware::updateChassisFeedbackAndOdom(double dt_s)
     }
     x = odom_x_;
     y = odom_y_;
+  }
+
+  if (origin_reset) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Chassis odom origin set: yaw0=%.3f rad, x=y=0 (%s→%s)",
+      orientation[2], chassis_odom_parent_frame_.c_str(),
+      chassis_odom_child_frame_.c_str());
   }
 
   publishChassisOdomAndTf(stamp, x, y, yaw, vx_b, vy_b, wz_b, twist_ok);
@@ -981,8 +1026,9 @@ void ArxLiftHardware::setupChassisCmdVelSubscription()
   RCLCPP_INFO(
     get_logger(),
     "Chassis cmd_vel mapping enabled: topic=%s timeout=%.2f s "
-    "(mode 1 run / 2 park; Twist vx/vy/wz passthrough)",
-    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_);
+    "(chassis_mode=%d: 1=/cmd_vel body twist, 3=wheel-speed hold zeros; "
+    "park=2 on timeout/exit)",
+    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_, chassis_mode_);
 }
 
 void ArxLiftHardware::teardownChassisCmdVelSubscription()
@@ -1000,10 +1046,26 @@ bool ArxLiftHardware::applyChassisCmd(bool force_park)
     return false;
   }
 
-  if (
-    !enable_chassis_cmd_vel_ || force_park || soft_stop_active_.load() ||
-    !command_enabled_.load())
-  {
+  const bool must_park =
+    force_park || soft_stop_active_.load() || !command_enabled_.load();
+  if (must_park) {
+    lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
+    lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
+    chassis_mode_cmd_.store(2);
+    return false;
+  }
+
+  // 官方 /body_control：setWheelVel + setChassisCmd(0,0,0, mode1=3)。
+  // 本路径不下发轮速指令，只保持 mode=3，便于手转轮读 0x702。
+  if (chassis_mode_ == 3) {
+    lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
+    lift_->setChassisCmd(0.0, 0.0, 0.0, 3);
+    chassis_mode_cmd_.store(3);
+    return true;
+  }
+
+  if (!enable_chassis_cmd_vel_ || chassis_mode_ == 2) {
+    lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
     lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
     chassis_mode_cmd_.store(2);
     return false;
@@ -1022,6 +1084,7 @@ bool ArxLiftHardware::applyChassisCmd(bool force_park)
   }
 
   if (timed_out) {
+    lift_->setWheelVel(0.0, 0.0, 0.0, 0.0);
     lift_->setChassisCmd(0.0, 0.0, 0.0, 2);
     chassis_mode_cmd_.store(2);
     return false;
@@ -1272,6 +1335,20 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     chassis_cmd_timeout_sec_ = 0.3;
   }
 
+  if (!parse_int_param(
+      info_, "chassis_mode", 1, chassis_mode_, get_logger()))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  if (chassis_mode_ != 1 && chassis_mode_ != 2 && chassis_mode_ != 3) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "chassis_mode must be 1 (body twist), 2 (park), or 3 (wheel-speed hold); "
+      "got %d",
+      chassis_mode_);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   // LIFTS(setRobotType=2) 的 .so 不写 max_vel_*；缺省用 X7S 同档，可用 URDF 覆盖。
   if (!parse_double_param(
       info_, "chassis_max_vel_x", 2.0, chassis_max_vel_x_, get_logger()) ||
@@ -1440,7 +1517,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     "motor_mode=%s soft_p_kp=%.3f hybrid_kp=%.3f hybrid_kd=%.3f "
     "gravity=%.3f coulomb_friction=%.3f friction_vel_eps=%.4f m/s "
     "ramp=%.3f m/s shutdown_return_home=%s height=%.3f "
-    "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s "
+    "enable_chassis_cmd_vel=%s topic=%s timeout=%.2f s chassis_mode=%d "
     "chassis_max_vel=%.2f/%.2f/%.2f "
     "chassis_feedback=%s odom=%s odom_tf=%s odom_debug=%s (%s→%s) "
     "wheel_r=%.4f mecanum_deg=%.1f vel_scale=%.3f deadband=%.3f",
@@ -1450,7 +1527,7 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_init(
     coulomb_friction_torque_.load(), friction_vel_eps_mps_.load(),
     cmd_ramp_vel_mps_, shutdown_return_home_ ? "true" : "false",
     shutdown_height_m_, enable_chassis_cmd_vel_ ? "true" : "false",
-    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_,
+    chassis_cmd_vel_topic_.c_str(), chassis_cmd_timeout_sec_, chassis_mode_,
     chassis_max_vel_x_, chassis_max_vel_y_, chassis_max_vel_z_,
     enable_chassis_feedback_ ? "true" : "false",
     enable_chassis_odom_ ? "true" : "false",
@@ -1693,6 +1770,13 @@ hardware_interface::CallbackReturn ArxLiftHardware::on_activate(
       soft_p_kp_.load(), hybrid_kp_.load(), hybrid_kd_.load(),
       gravity_compensation_torque_.load(), coulomb_friction_torque_.load(),
       friction_vel_eps_mps_.load());
+    if (chassis_mode_ == 3) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Chassis hold mode=3 (zero body twist + zero wheel cmd). "
+        "Hand-spin wheels; watch /body_information temp_float_data[1..3]. "
+        "Do not publish /cmd_vel. Restore teleop with xacro_chassis_mode:=1");
+    }
     return hardware_interface::CallbackReturn::SUCCESS;
   } catch (const std::exception & e) {
     RCLCPP_ERROR(get_logger(), "Failed to activate ArxLiftHardware: %s", e.what());
