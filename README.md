@@ -51,7 +51,7 @@ Lift2S 真机 xacro 已打开上述关机回零；单臂 / ACone 默认仅 `set_
 ./quick_start.sh   # Build → 真机包；Launch → 自动预启 Zenoh；单臂可选左/右
 
 # 手动 launch（RMW=zenoh 时先另开终端: ros2 run rmw_zenoh_cpp rmw_zenohd）
-source ~/lift2s-ws/install/setup.bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can1
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx5 hardware:=real xacro_can_interface:=can3
 ros2 launch ocs2_arm_controller demo.launch.py robot:=arx_acone hardware:=real
